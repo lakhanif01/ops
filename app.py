@@ -12,7 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
 
 __version__ = "1.4.0"
-BUILD = "2026-07-18-5"
+BUILD = "2026-07-18-6"
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
 SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_KEY") or os.environ.get("SUPABASE_KEY", "")
@@ -1255,9 +1255,29 @@ def set_cutoff(vid: int, payload: dict = Body(...)):
 
 from fastapi import Header
 
+@app.get("/auth/status")
+def auth_status():
+    """Diagnostic: does the auth layer work? Confirms tables reachable + admin exists."""
+    try:
+        users = DB.select("app_user")
+        return {"ok": True, "user_count": len(users),
+                "admin_exists": any(u["username"] == "admin" for u in users),
+                "db_mode": DB_MODE}
+    except Exception as e:
+        return {"ok": False, "error": str(e), "db_mode": DB_MODE}
+
 @app.post("/auth/login")
 def auth_login(payload: dict = Body(...)):
-    u = DB.select("app_user", {"username": (payload.get("username") or "").strip()})
+    uname = (payload.get("username") or "").strip()
+    # self-heal: if the user table is empty (seed didn't run), create admin now
+    try:
+        if not DB.select("app_user", {"username": "admin"}):
+            DB.insert("app_user", {"username": "admin", "pw_hash": _hash_pw("ChangeMe#2026"),
+                                   "role": "admin", "must_change": True, "active": True,
+                                   "created_at": datetime.datetime.utcnow().isoformat()})
+    except Exception as e:
+        raise HTTPException(500, f"User table not reachable: {e}")
+    u = DB.select("app_user", {"username": uname})
     if not u or not u[0].get("active", True) or not _verify_pw(payload.get("password", ""), u[0]["pw_hash"]):
         raise HTTPException(401, "Invalid username or password")
     u = u[0]
