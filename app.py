@@ -2,7 +2,7 @@
 OPS — DC Shipping Forecast  (backend)
 FastAPI on Hugging Face Spaces · Supabase/PostgREST schema `ops` · memory demo mode when no SUPABASE_URL
 """
-import os, io, json, re, time, datetime
+import os, io, json, re, time, datetime, hashlib, secrets
 from collections import defaultdict
 from typing import Optional, Any
 
@@ -11,8 +11,8 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Query, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
 
-__version__ = "1.3.0"
-BUILD = "2026-07-18-4"
+__version__ = "1.4.0"
+BUILD = "2026-07-18-5"
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
 SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_KEY") or os.environ.get("SUPABASE_KEY", "")
@@ -32,6 +32,18 @@ app.add_middleware(
 # ------------------------------------------------------------------
 # DB layer — PostgREST client with in-memory fallback (demo/test mode)
 # ------------------------------------------------------------------
+def _hash_pw(pw, salt=None):
+    salt = salt or secrets.token_hex(8)
+    h = hashlib.pbkdf2_hmac("sha256", pw.encode(), salt.encode(), 100000).hex()
+    return f"{salt}${h}"
+
+def _verify_pw(pw, stored):
+    try:
+        salt, h = stored.split("$", 1)
+        return secrets.compare_digest(hashlib.pbkdf2_hmac("sha256", pw.encode(), salt.encode(), 100000).hex(), h)
+    except Exception:
+        return False
+
 class MemoryDB:
     def __init__(self):
         self.t = defaultdict(list)
@@ -53,6 +65,8 @@ class MemoryDB:
                        ("Dept. Stores EOL","DS"),("Ecomm","ECOM"),("Boutiques","BTQ"),("Regional Sport","RSPT"),
                        ("National Sport","NSPT"),("Defense","DEF"),("Audiology","ECOM")]:
             self.insert("cot_alias", {"cot":cot,"channel_code":ch})
+        self.insert("app_user", {"username":"admin","pw_hash":_hash_pw("ChangeMe#2026"),
+                                 "role":"admin","must_change":True,"active":True})
 
     def select(self, table, filters=None, order=None):
         rows = self.t[table]
@@ -140,6 +154,32 @@ class RestDB:
 
 DB = RestDB() if SUPABASE_URL else MemoryDB()
 DB_MODE = "supabase" if SUPABASE_URL else "memory"
+
+def ensure_seed_admin():
+    try:
+        rows = DB.select("app_user", {"username": "admin"})
+        if not rows:
+            DB.insert("app_user", {"username": "admin", "pw_hash": _hash_pw("ChangeMe#2026"),
+                                   "role": "admin", "must_change": True, "active": True,
+                                   "created_at": datetime.datetime.utcnow().isoformat()})
+    except Exception as e:
+        print("seed admin skipped:", e)
+ensure_seed_admin()
+
+def _new_token(): return secrets.token_urlsafe(24)
+
+def current_user(token):
+    if not token: return None
+    s = DB.select("session", {"token": token})
+    if not s: return None
+    s = s[0]
+    try:
+        if datetime.datetime.fromisoformat(s["expires_at"].replace("Z","")) < datetime.datetime.utcnow():
+            return None
+    except Exception:
+        pass
+    u = DB.select("app_user", {"id": s["user_id"]})
+    return u[0] if u else None
 
 # special (non-channel) forecast lines
 LINES = ["RW_TTL", "RW_META", "NUANCE", "OW_TTL", "OW_META"]
@@ -1213,6 +1253,240 @@ def set_cutoff(vid: int, payload: dict = Body(...)):
     set_setting(f"cutoff_v{vid}", payload.get("cutoff"))
     return {"ok": True}
 
+from fastapi import Header
+
+@app.post("/auth/login")
+def auth_login(payload: dict = Body(...)):
+    u = DB.select("app_user", {"username": (payload.get("username") or "").strip()})
+    if not u or not u[0].get("active", True) or not _verify_pw(payload.get("password", ""), u[0]["pw_hash"]):
+        raise HTTPException(401, "Invalid username or password")
+    u = u[0]
+    tok = _new_token()
+    DB.insert("session", {"token": tok, "user_id": u["id"],
+                          "created_at": datetime.datetime.utcnow().isoformat(),
+                          "expires_at": (datetime.datetime.utcnow() + datetime.timedelta(days=7)).isoformat()})
+    DB.update("app_user", {"id": u["id"]}, {"last_login": datetime.datetime.utcnow().isoformat()})
+    return {"token": tok, "username": u["username"], "role": u["role"], "must_change": u.get("must_change", False)}
+
+@app.get("/auth/me")
+def auth_me(authorization: Optional[str] = Header(None)):
+    tok = (authorization or "").replace("Bearer ", "")
+    u = current_user(tok)
+    if not u: raise HTTPException(401, "not authenticated")
+    return {"username": u["username"], "role": u["role"], "must_change": u.get("must_change", False)}
+
+@app.post("/auth/change_password")
+def auth_change(payload: dict = Body(...), authorization: Optional[str] = Header(None)):
+    tok = (authorization or "").replace("Bearer ", "")
+    u = current_user(tok)
+    if not u: raise HTTPException(401, "not authenticated")
+    newpw = payload.get("new_password", "")
+    if len(newpw) < 8: raise HTTPException(400, "Password must be at least 8 characters")
+    DB.update("app_user", {"id": u["id"]}, {"pw_hash": _hash_pw(newpw), "must_change": False})
+    return {"ok": True}
+
+@app.post("/auth/logout")
+def auth_logout(authorization: Optional[str] = Header(None)):
+    tok = (authorization or "").replace("Bearer ", "")
+    if tok: DB.delete("session", {"token": tok})
+    return {"ok": True}
+
+@app.get("/auth/users")
+def auth_users(authorization: Optional[str] = Header(None)):
+    tok = (authorization or "").replace("Bearer ", "")
+    u = current_user(tok)
+    if not u or u["role"] != "admin": raise HTTPException(403, "admin only")
+    return [{"id": x["id"], "username": x["username"], "role": x["role"],
+             "active": x.get("active", True), "must_change": x.get("must_change", False),
+             "last_login": x.get("last_login")} for x in DB.select("app_user", order="id")]
+
+@app.post("/auth/users")
+def auth_add_user(payload: dict = Body(...), authorization: Optional[str] = Header(None)):
+    tok = (authorization or "").replace("Bearer ", "")
+    u = current_user(tok)
+    if not u or u["role"] != "admin": raise HTTPException(403, "admin only")
+    uname = (payload.get("username") or "").strip()
+    if not uname: raise HTTPException(400, "username required")
+    if DB.select("app_user", {"username": uname}): raise HTTPException(400, "username exists")
+    temp = payload.get("temp_password") or secrets.token_urlsafe(6)
+    DB.insert("app_user", {"username": uname, "pw_hash": _hash_pw(temp),
+                           "role": payload.get("role", "planner"), "must_change": True, "active": True,
+                           "created_at": datetime.datetime.utcnow().isoformat()})
+    return {"ok": True, "username": uname, "temp_password": temp}
+
+@app.post("/auth/users/{uid}/reset")
+def auth_reset_user(uid: int, authorization: Optional[str] = Header(None)):
+    tok = (authorization or "").replace("Bearer ", "")
+    u = current_user(tok)
+    if not u or u["role"] != "admin": raise HTTPException(403, "admin only")
+    temp = secrets.token_urlsafe(6)
+    DB.update("app_user", {"id": uid}, {"pw_hash": _hash_pw(temp), "must_change": True})
+    return {"ok": True, "temp_password": temp}
+
+@app.patch("/auth/users/{uid}")
+def auth_patch_user(uid: int, payload: dict = Body(...), authorization: Optional[str] = Header(None)):
+    tok = (authorization or "").replace("Bearer ", "")
+    u = current_user(tok)
+    if not u or u["role"] != "admin": raise HTTPException(403, "admin only")
+    allowed = {k: v for k, v in payload.items() if k in ("role", "active")}
+    if allowed: DB.update("app_user", {"id": uid}, allowed)
+    return {"ok": True}
+
+# ---- rate & dummy suggestions (Eleanor's logic) ----
+@app.get("/rates/suggest")
+def rates_suggest(version_id: int, months: int = 6):
+    """Accessories % and Returns % of gross per DC from history (fallback current-cycle actuals).
+    Eleanor: >=3-6 months of history, rate = returns / gross (and acc / gross)."""
+    v = DB.select("version", {"id": version_id})
+    if not v: raise HTTPException(404, "version not found")
+    hist = DB.select("history")
+    src_label = f"trailing {months} months of history"
+    gross = defaultdict(float); ret = defaultdict(float); acc = defaultdict(float)
+    if hist:
+        latest = max((h["year"], h["month_no"]) for h in hist)
+        lo = latest[0] * 12 + latest[1] - (months - 1)
+        for h in hist:
+            if h["year"] * 12 + h["month_no"] < lo: continue
+            if h["kind"] == "GROSS": gross[h["dc_code"]] += h["units"]
+            elif h["kind"] == "RETURN": ret[h["dc_code"]] += h["units"]
+        # accessories aren't in history table; use current-cycle actuals for acc ratio
+    acts = DB.select("actual", {"cycle_id": v[0]["cycle_id"]})
+    cyc_gross = defaultdict(float)
+    for a in acts:
+        if a["kind"] == "GROSS": cyc_gross[a["dc_code"]] += a["units"]
+        elif a["kind"] == "ACC": acc[a["dc_code"]] += a["units"]
+        elif a["kind"] == "RETURN" and not hist: ret[a["dc_code"]] += a["units"]
+    if not hist:
+        src_label = "current cycle QTD actuals (import history for a real window)"
+        gross = cyc_gross
+    out = []
+    for dc in ("ATL", "MX"):
+        g = gross.get(dc, 0) or cyc_gross.get(dc, 0)
+        gacc = cyc_gross.get(dc, 0)
+        out.append({"dc_code": dc, "kind": "RET", "pct": round(ret.get(dc, 0) / g, 4) if g else 0})
+        out.append({"dc_code": dc, "kind": "ACC", "pct": round(acc.get(dc, 0) / gacc, 4) if gacc else 0})
+    return {"suggestions": out, "basis": src_label,
+            "note": "Returns % from returns/gross; Accessories % from accessories/gross (QTD)."}
+
+@app.get("/dummy_plan/suggest")
+def dummy_suggest(version_id: int, weeks: int = 26):
+    """Dummy run-rate from trailing history (Eleanor: ~800-1500/wk Atlanta average)."""
+    v = DB.select("version", {"id": version_id})
+    if not v: raise HTTPException(404, "version not found")
+    hist = DB.select("history")
+    # dummies live in actual table (kind DUMMY) for current cycle; use that as run-rate basis
+    acts = DB.select("actual", {"cycle_id": v[0]["cycle_id"]})
+    by_dc_wk = defaultdict(list)
+    for a in acts:
+        if a["kind"] == "DUMMY": by_dc_wk[a["dc_code"]].append(a["units"])
+    rr = {}
+    for dc, vals in by_dc_wk.items():
+        nz = [x for x in vals if x > 0]
+        rr[dc] = round(sum(nz) / len(nz)) if nz else 0
+    return {"run_rate": rr or {"ATL": 1200},
+            "basis": "average of non-zero dummy weeks this cycle",
+            "note": "Apply to forecast weeks; add supply-chain bulk drops manually in the known week."}
+
+@app.get("/drilldown")
+def drilldown(version_id: int):
+    """QTD (actual) and QTG (to-go forecast) broken down by DC x Month x Product x Channel.
+    Product = frames(gross) | returns | accessories | dummies | rw | ow | nuance | goggles(subset of frames)."""
+    m = compute_model(version_id)
+    periods = {p["id"]: p for p in m["periods"]}
+    act_set = set(m["actualized_periods"])
+    ch_names = {c["code"]: c["name"] for c in m["channels"]}
+    MN = ["", "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+    rows = []   # each: dc, month, product, channel, qtd, qtg
+    def add(dc, mo, product, channel, qtd, qtg):
+        if abs(qtd) < 0.5 and abs(qtg) < 0.5: return
+        rows.append({"dc": dc, "month": MN[mo], "month_no": mo, "product": product,
+                     "channel": channel, "qtd": round(qtd), "qtg": round(qtg)})
+    for dc in ("ATL", "MX", "DIRECT"):
+        for r in m["grids"][dc]["rows"]:
+            mo = periods[r["period_id"]]["month_no"]
+            is_act = r["period_id"] in act_set
+            for c in m["channels"]:
+                v = r["cells"][c["code"]]["v"]
+                add(dc, mo, "Frames", ch_names[c["code"]], v if is_act else 0, 0 if is_act else v)
+            if dc != "DIRECT":
+                add(dc, mo, "Accessories", "-", r["acc"] if is_act else 0, 0 if is_act else r["acc"])
+                add(dc, mo, "Returns", "-", r["ret"] if is_act else 0, 0 if is_act else r["ret"])
+                add(dc, mo, "Dummies", "-", r["dummy"] if is_act else 0, 0 if is_act else r["dummy"])
+                add(dc, mo, "RW", "-", r["rw"] if is_act else 0, 0 if is_act else r["rw"])
+                add(dc, mo, "Nuance", "-", r["nuance"] if is_act else 0, 0 if is_act else r["nuance"])
+                add(dc, mo, "OW", "-", r["ow"] if is_act else 0, 0 if is_act else r["ow"])
+            else:
+                add(dc, mo, "Meta RW", "-", r.get("meta_rw", 0) if is_act else 0, 0 if is_act else r.get("meta_rw", 0))
+                add(dc, mo, "Meta OW", "-", r.get("meta_ow", 0) if is_act else 0, 0 if is_act else r.get("meta_ow", 0))
+    # country level frames
+    for dc in ("IT", "CN", "TH"):
+        for r in m["customer_grid"]["countries"][dc]["rows"]:
+            mo = periods[r["period_id"]]["month_no"]
+            is_act = r["actual"]
+            g = (r.get("actual_total") if is_act and r.get("actual_total") is not None
+                 else r.get("reconciled_total", r["total"]))
+            add(dc, mo, "Frames", "all", g if is_act else 0, 0 if is_act else g)
+    tot_qtd = sum(r["qtd"] for r in rows); tot_qtg = sum(r["qtg"] for r in rows)
+    return {"rows": rows, "totals": {"qtd": round(tot_qtd), "qtg": round(tot_qtg)},
+            "dcs": ["ATL", "MX", "DIRECT", "IT", "CN", "TH"],
+            "products": ["Frames", "Goggles", "Accessories", "Returns", "Dummies", "RW", "OW", "Nuance", "Meta RW", "Meta OW"]}
+
+@app.post("/validate/legacy_export")
+async def validate_legacy_export(file: UploadFile = File(...), version_id: int = Form(...),
+                                 tolerance_pct: float = Form(2.0)):
+    """Same as /validate/legacy but returns an Excel diff workbook (week x DC totals + channel detail)."""
+    import openpyxl
+    from openpyxl.styles import Font, PatternFill
+    data = await file.read()
+    # reuse legacy compare by calling internals
+    m = compute_model(version_id)
+    wb_in = load_wb(data)
+    ch_codes = [c["code"] for c in m["channels"]]
+    ch_names = {c["code"]: c["name"] for c in m["channels"]}
+    legacy = _parse_legacy_channel_file(wb_in, m)
+    out = openpyxl.Workbook(); out.remove(out.active)
+    HDR = Font(bold=True, color="FFFFFF"); NAVY = PatternFill("solid", fgColor="1F3864")
+    BAD = PatternFill("solid", fgColor="FCE4CC")
+    def sheet_for(title, header, data_rows):
+        ws = out.create_sheet(title)
+        for j, h in enumerate(header, 1):
+            c = ws.cell(1, j, h); c.font = HDR; c.fill = NAVY
+        for i, row in enumerate(data_rows, 2):
+            for j, val in enumerate(row, 1):
+                ws.cell(i, j, val)
+            # flag row if last col (status) is off
+            if row[-1] == "off":
+                for j in range(1, len(row) + 1): ws.cell(i, j).fill = BAD
+        for j in range(1, len(header) + 1):
+            ws.column_dimensions[openpyxl.utils.get_column_letter(j)].width = 14
+        return ws
+    if legacy:
+        summ = []
+        chan = []
+        for dc, obj in legacy.items():
+            app_rows = {r["label"]: r for r in m["grids"][dc]["rows"]}
+            for (mo, wk), fr in obj["rows"].items():
+                lbl = f"{mo}-{wk}"; ar = app_rows.get(lbl)
+                if not ar: continue
+                d = ar["gross"] - fr["total"]
+                pct = (d / fr["total"] * 100) if fr["total"] else 0
+                ok = abs(pct) <= tolerance_pct or abs(d) <= 25
+                summ.append([dc, lbl, round(fr["total"]), round(ar["gross"]), round(d),
+                             round(pct, 1), "ok" if ok else "off"])
+                for i, ch in enumerate(ch_codes):
+                    fv = fr["channels"][i]; av = ar["cells"][ch]["v"]; dd = av - fv
+                    if abs(dd) > max(50, abs(fv) * tolerance_pct / 100):
+                        chan.append([dc, lbl, ch_names[ch], round(fv), round(av), round(dd),
+                                     "off"])
+        sheet_for("Totals diff", ["DC", "Week", "File", "App", "Delta", "Delta%", "Status"], summ)
+        sheet_for("Channel diffs", ["DC", "Week", "Channel", "File", "App", "Delta", "Status"], chan)
+    else:
+        sheet_for("Info", ["message"], [["Upload an Atlanta/Mexico legacy workbook for channel-level export"]])
+    buf = io.BytesIO(); out.save(buf); buf.seek(0)
+    fn = f"Validation_diff_{m['version']['week_tag']}.xlsx"
+    return StreamingResponse(buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                             headers={"Content-Disposition": f'attachment; filename="{fn}"'})
+
 # serve the frontend when web/index.html sits next to app.py (single-host mode)
 _WEB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
 if os.path.exists(os.path.join(_WEB, "index.html")):
@@ -1396,16 +1670,20 @@ async def validate_legacy(file: UploadFile = File(...), version_id: int = Form(.
             if ar is None: continue
             d = ar["gross"] - fr["total"]
             pct_d = (d / fr["total"] * 100) if fr["total"] else (0 if abs(d) < 1 else 100)
-            diffs.append({"scope": dc, "week": lbl, "actual": ar["actual"],
-                          "file": round(fr["total"]), "app": round(ar["gross"]),
-                          "delta": round(d), "pct": round(pct_d, 1),
-                          "ok": abs(pct_d) <= tolerance_pct or abs(d) <= 25})
+            # per-channel breakdown for THIS week (for inline expand)
+            ch_break = []
             for i, ch in enumerate(ch_codes):
-                fv = fr["channels"][i]; av = ar["cells"][ch]["v"]
-                dd = av - fv
+                fv = fr["channels"][i]; av = ar["cells"][ch]["v"]; dd = av - fv
+                ch_break.append({"channel": ch_names[ch], "file": round(fv), "app": round(av), "delta": round(dd)})
                 if abs(dd) > max(50, abs(fv) * tolerance_pct / 100):
                     chan_diffs.append({"scope": dc, "week": lbl, "channel": ch_names[ch],
                                        "file": round(fv), "app": round(av), "delta": round(dd)})
+            ch_break.sort(key=lambda x: -abs(x["delta"]))
+            diffs.append({"scope": dc, "week": lbl, "actual": ar["actual"],
+                          "file": round(fr["total"]), "app": round(ar["gross"]),
+                          "delta": round(d), "pct": round(pct_d, 1),
+                          "ok": abs(pct_d) <= tolerance_pct or abs(d) <= 25,
+                          "channels": ch_break})
     chan_diffs.sort(key=lambda x: -abs(x["delta"]))
     return {"kind": "channel_file", "tolerance_pct": tolerance_pct, "rows": diffs,
             "channel_diffs": chan_diffs[:30],
