@@ -7,12 +7,12 @@ from collections import defaultdict
 from typing import Optional, Any
 
 import httpx
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Query, Body
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Query, Body, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
 
 __version__ = "1.4.0"
-BUILD = "2026-07-18-7"
+BUILD = "2026-07-18-8"
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
 SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_KEY") or os.environ.get("SUPABASE_KEY", "")
@@ -167,6 +167,14 @@ def ensure_seed_admin():
 ensure_seed_admin()
 
 def _new_token(): return secrets.token_urlsafe(24)
+
+def require_role(authorization, allowed):
+    tok = (authorization or "").replace("Bearer ", "")
+    u = current_user(tok)
+    if not u: raise HTTPException(401, "Not authenticated")
+    if u["role"] not in allowed:
+        raise HTTPException(403, f"Your role ({u['role']}) cannot perform this action")
+    return u
 
 def current_user(token):
     if not token: return None
@@ -325,7 +333,8 @@ def save_na_map(payload: dict = Body(...)):
 # versions
 # ------------------------------------------------------------------
 @app.post("/version/create")
-def create_version(payload: dict = Body(...)):
+def create_version(payload: dict = Body(...), authorization: Optional[str] = Header(None)):
+    require_role(authorization, ("admin","planner"))
     year, quarter = int(payload["year"]), int(payload["quarter"])
     cyc = ensure_cycle(year, quarter)
     tag = payload.get("week_tag") or f"WK{payload.get('week', '')}"
@@ -348,7 +357,8 @@ def create_version(payload: dict = Body(...)):
     return v
 
 @app.post("/version/{vid}/publish")
-def publish_version(vid: int):
+def publish_version(vid: int, authorization: Optional[str] = Header(None)):
+    require_role(authorization, ("admin","planner"))
     DB.update("version", {"id": vid}, {"published": True, "published_at": datetime.datetime.utcnow().isoformat()})
     return {"ok": True}
 
@@ -370,7 +380,8 @@ def _commit_or_preview(commit, kind, filename, rows_payload, do_commit):
     return {"preview": False, **result}
 
 @app.post("/import/na")
-async def import_na(file: UploadFile = File(...), version_id: int = Form(...), commit: bool = Form(False)):
+async def import_na(file: UploadFile = File(...), version_id: int = Form(...), commit: bool = Form(False), authorization: Optional[str] = Header(None)):
+    require_role(authorization, ('admin','planner'))
     data = await file.read()
     v = DB.select("version", {"id": version_id})
     if not v: raise HTTPException(404, "version not found")
@@ -489,7 +500,8 @@ def parse_all_channels(data, filename, aliases, cot_map, month_filter=None, want
     return agg, cust_agg, unmapped_cot, unmapped_plant, nrows
 
 @app.post("/import/actuals")
-async def import_actuals(file: UploadFile = File(...), version_id: int = Form(...), commit: bool = Form(False)):
+async def import_actuals(file: UploadFile = File(...), version_id: int = Form(...), commit: bool = Form(False), authorization: Optional[str] = Header(None)):
+    require_role(authorization, ('admin','planner'))
     """BO 'All Channels Data' export for the CURRENT cycle. Net invoices across all transaction kinds per COT
     (Eleanor parity), wearable brands routed to RW/OW/Nuance lines, Meta LLC to META lines, goggles carved
     out of sport COTs by collection mix. Completed weeks become gray."""
@@ -519,7 +531,8 @@ async def import_actuals(file: UploadFile = File(...), version_id: int = Form(..
     return _commit_or_preview(commit, "ACTUALS", file.filename, preview, do_commit)
 
 @app.post("/import/history")
-async def import_history(file: UploadFile = File(...), commit: bool = Form(False)):
+async def import_history(file: UploadFile = File(...), commit: bool = Form(False), authorization: Optional[str] = Header(None)):
+    require_role(authorization, ('admin','planner'))
     """Historical BO 'All Channels Data' export (any months/quarters — e.g. a rolling 6-month pull).
     Feeds the trailing-window penetration suggest for channels AND customers.
     Customer rows are matched by name/alias against Commercial Entity: Name — matches are counted in the
@@ -564,7 +577,8 @@ async def import_history(file: UploadFile = File(...), commit: bool = Form(False
     return _commit_or_preview(commit, "HISTORY", file.filename, preview, do_commit)
 
 @app.post("/import/accessories")
-async def import_accessories(file: UploadFile = File(...), version_id: int = Form(...), commit: bool = Form(False)):
+async def import_accessories(file: UploadFile = File(...), version_id: int = Form(...), commit: bool = Form(False), authorization: Optional[str] = Header(None)):
+    require_role(authorization, ('admin','planner'))
     """Flat BO accessories report: Year, Month, Week, Invoices, Plant (sheet 'Report 2' or first flat sheet)."""
     data = await file.read()
     v = DB.select("version", {"id": version_id})
@@ -603,7 +617,8 @@ async def import_accessories(file: UploadFile = File(...), version_id: int = For
     return _commit_or_preview(commit, "ACC", file.filename, preview, do_commit)
 
 @app.post("/import/dummies")
-async def import_dummies(file: UploadFile = File(...), version_id: int = Form(...), commit: bool = Form(False)):
+async def import_dummies(file: UploadFile = File(...), version_id: int = Form(...), commit: bool = Form(False), authorization: Optional[str] = Header(None)):
+    require_role(authorization, ('admin','planner'))
     """Dummy actuals from BO 'All Channels' flat sheet in the dummy workbook (Year/Month/Week + Invoices-like col + Plant),
     or any flat sheet with those columns."""
     data = await file.read()
@@ -654,7 +669,8 @@ async def import_dummies(file: UploadFile = File(...), version_id: int = Form(..
 
 @app.post("/import/customers")
 async def import_customers(file: UploadFile = File(...), version_id: int = Form(...), commit: bool = Form(False),
-                           sheet: str = Form("")):
+                           sheet: str = Form(""), authorization: Optional[str] = Header(None)):
+    require_role(authorization, ('admin','planner'))
     """Customer-week forecast grid (Direct). Wide format: a header row containing customer names,
     rows keyed by week (col with 'M-W' labels or Week+Month columns). Unknown customers listed in preview;
     on commit they are auto-created (scalable) and flagged."""
@@ -815,6 +831,31 @@ def add_override(payload: dict = Body(...)):
 def del_override(oid: int):
     DB.update("override", {"id": oid}, {"active": False})
     return {"ok": True}
+
+@app.post("/overrides/reallocate_negatives")
+def reallocate_negatives(payload: dict = Body(...)):
+    """One-click: for every negative export-DC customer-week (IT/CN/TH), create an override that
+    zeroes it and logs the reason. Returns physically process through Atlanta, so a negative direct
+    week doesn't belong on an export DC. Additive: creates override rows, never deletes data."""
+    version_id = payload["version_id"]
+    author = payload.get("author", "")
+    m = compute_model(version_id)
+    act_set = set(m["actualized_periods"])
+    made = []
+    existing = {(o["dc_code"], o["target_key"], o["period_id"]) for o in DB.select("override", {"version_id": version_id}) if o.get("active", True)}
+    for dc in ("IT", "CN", "TH"):
+        for row in m["customer_grid"]["countries"][dc]["rows"]:
+            if row["period_id"] in act_set: continue   # never touch actuals
+            for cid, cell in row["cells"].items():
+                if cell["v"] < 0 and (dc, str(cid), row["period_id"]) not in existing:
+                    cust = next((c["name"] for c in m["customers"] if c["id"] == cid), str(cid))
+                    DB.insert("override", {"version_id": version_id, "dc_code": dc, "target_kind": "CUSTOMER",
+                                           "target_key": str(cid), "period_id": row["period_id"], "units": 0,
+                                           "reason": f"Negative reallocated to Atlanta (returns process through ATL) - was {round(cell['v'])}",
+                                           "author": author, "active": True,
+                                           "created_at": datetime.datetime.utcnow().isoformat()})
+                    made.append({"dc": dc, "customer": cust, "week": row["label"], "was": round(cell["v"])})
+    return {"ok": True, "count": len(made), "reallocated": made}
 
 # ------------------------------------------------------------------
 # model compute — the engine
@@ -1130,7 +1171,17 @@ def export_dc(version_id: int, which: str = Query("atl_mx", pattern="^(atl_mx|di
     GRAY = PatternFill("solid", fgColor="D9D9D9")
     ORANGE = PatternFill("solid", fgColor="FCE4CC")
     HDR = Font(bold=True); NAVY = Font(bold=True, color="1F3864")
-    pct_lbl = f"{m['cycle']['label']} Forecast — {m['version']['week_tag']}"
+    NUMFMT = "#,##0"        # commas, zero decimals
+    PCTFMT = "0.0%"
+    pct_lbl = f"{m['cycle']['label']} Forecast - {m['version']['week_tag']}"
+    MN = ["", "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+    def numcell(ws, r, c, val, fill=None, fmt=NUMFMT, bold=False):
+        cell = ws.cell(r, c, round(val) if val is not None else None)
+        cell.number_format = fmt
+        if fill: cell.fill = fill
+        if bold: cell.font = HDR
+        return cell
 
     def channel_sheet(ws, dc):
         chs = m["channels"]
@@ -1147,54 +1198,52 @@ def export_dc(version_id: int, which: str = Query("atl_mx", pattern="^(atl_mx|di
             mo, wk = row["label"].split("-")
             rr = r0 + i
             ws.cell(rr, 1, int(wk)); ws.cell(rr, 2, int(mo))
-            ws.cell(rr, 3, round(row["gross"], 1))
+            numcell(ws, rr, 3, row["gross"])
             for j, c in enumerate(chs, 4):
-                cell = ws.cell(rr, j, round(row["cells"][c["code"]]["v"], 1))
-                if row["actual"]: cell.fill = GRAY
-                elif row["cells"][c["code"]]["src"] == "override": cell.fill = ORANGE
+                fill = GRAY if row["actual"] else (ORANGE if row["cells"][c["code"]]["src"] == "override" else None)
+                numcell(ws, rr, j, row["cells"][c["code"]]["v"], fill)
             base = 4 + len(chs) + 1
             if dc == "DIRECT":
-                vals = [None, None, round(row["gross"], 1), None, None, None,
-                        round(row.get("meta_rw", 0), 1), None, round(row.get("meta_ow", 0), 1)]
-                labels_fix = {}
+                vals = [(None, NUMFMT), (None, NUMFMT), (row["gross"], NUMFMT), (None, NUMFMT), (None, NUMFMT),
+                        (None, NUMFMT), (row.get("meta_rw", 0), NUMFMT), (None, NUMFMT), (row.get("meta_ow", 0), NUMFMT)]
             else:
                 q = row["gross"] + row["acc"] + row["ret"]
-                vals = [round(row["acc"], 1), round(row["ret"], 1), round(q, 1),
-                        round(row["acc"] / q, 4) if q else 0, round(row["ret"] / q, 4) if q else 0,
-                        round(row["dummy"], 1), round(row["rw"], 1), round(row["nuance"], 1), round(row["ow"], 1)]
-                labels_fix = {}
-            for j, vv in enumerate(vals):
+                vals = [(row["acc"], NUMFMT), (row["ret"], NUMFMT), (q, NUMFMT),
+                        (row["acc"] / q if q else 0, PCTFMT), (row["ret"] / q if q else 0, PCTFMT),
+                        (row["dummy"], NUMFMT), (row["rw"], NUMFMT), (row["nuance"], NUMFMT), (row["ow"], NUMFMT)]
+            for j, (vv, fmt) in enumerate(vals):
                 if vv is not None:
-                    cell = ws.cell(rr, base + j, vv)
-                    if row["actual"]: cell.fill = GRAY
-            for col, lab in labels_fix.items():
-                ws.cell(2, col, lab).font = HDR
-        # totals row
+                    if fmt == PCTFMT:
+                        cell = ws.cell(rr, base + j, round(vv, 4)); cell.number_format = fmt
+                        if row["actual"]: cell.fill = GRAY
+                    else:
+                        numcell(ws, rr, base + j, vv, GRAY if row["actual"] else None)
         tr = r0 + len(m["grids"][dc]["rows"])
-        ws.cell(tr, 3, f"=SUM(C{r0}:C{tr-1})").font = HDR
+        c = ws.cell(tr, 3, f"=SUM(C{r0}:C{tr-1})"); c.font = HDR; c.number_format = NUMFMT
         for j in range(4, 4 + len(chs)):
             L2 = get_column_letter(j)
-            ws.cell(tr, j, f"=SUM({L2}{r0}:{L2}{tr-1})").font = HDR
-        # monthly summary block
+            c = ws.cell(tr, j, f"=SUM({L2}{r0}:{L2}{tr-1})"); c.font = HDR; c.number_format = NUMFMT
         sr = tr + 2
         ws.cell(sr - 1, 1, "Monthly").font = NAVY
         months = sorted(m["summary"][dc]["months"])
         for k, mo in enumerate(months):
-            ws.cell(sr + k, 1, ["", "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][mo])
-            ws.cell(sr + k, 3, round(m["summary"][dc]["months"][mo].get("gross", 0)))
+            ws.cell(sr + k, 1, MN[mo])
+            numcell(ws, sr + k, 3, m["summary"][dc]["months"][mo].get("gross", 0))
         ws.cell(sr + len(months), 1, "QTD actual").font = HDR
-        ws.cell(sr + len(months), 3, round(m["summary"][dc]["qtd"].get("gross", 0)))
+        numcell(ws, sr + len(months), 3, m["summary"][dc]["qtd"].get("gross", 0), bold=True)
         ws.cell(sr + len(months) + 1, 1, "To go").font = HDR
-        ws.cell(sr + len(months) + 1, 3, round(m["summary"][dc]["togo"].get("gross", 0)))
+        numcell(ws, sr + len(months) + 1, 3, m["summary"][dc]["togo"].get("gross", 0), bold=True)
         ws.freeze_panes = "C3"
         for col in range(1, 4 + len(chs) + 12): ws.column_dimensions[get_column_letter(col)].width = 12
         ws.column_dimensions["A"].width = 7; ws.column_dimensions["B"].width = 7
 
     def customer_sheet(ws, dc):
-        cg = m["customer_grid"]
-        custs = m["customers"]
+        cg = m["customer_grid"]; custs = m["customers"]
         ws["A1"] = pct_lbl; ws["A1"].font = NAVY
-        hdrs = ["Week", "Month", f"{dict(IT='Italy', CN='China', TH='Thailand', ALL='Total')[dc]}"] + [c["name"] for c in custs]
+        from openpyxl.utils import get_column_letter as gl
+        oc = 4 + len(custs)
+        hdrs = ["Week", "Month", f"{dict(IT='Italy', CN='China', TH='Thailand', ALL='Total')[dc]}"] + \
+               [c["name"] for c in custs] + ["Other"]
         for j, h in enumerate(hdrs, 1): ws.cell(2, j, h).font = HDR
         rows = cg["rows"] if dc == "ALL" else cg["countries"][dc]["rows"]
         for i, row in enumerate(rows):
@@ -1202,46 +1251,97 @@ def export_dc(version_id: int, which: str = Query("atl_mx", pattern="^(atl_mx|di
             rr = 3 + i
             ws.cell(rr, 1, int(wk)); ws.cell(rr, 2, int(mo))
             if dc == "ALL":
-                ws.cell(rr, 3, round(row["total"], 1))
+                numcell(ws, rr, 3, row.get("reconciled_total", row["total"]))
                 for j, cu in enumerate(custs, 4):
-                    cell = ws.cell(rr, j, round(row["cells"].get(cu["id"], 0), 1))
-                    if row["actual"]: cell.fill = GRAY
+                    numcell(ws, rr, j, row["cells"].get(cu["id"], 0), GRAY if row["actual"] else None)
             else:
                 _tot = (row.get("actual_total") if row["actual"] and row.get("actual_total") is not None
                         else row.get("reconciled_total", row["total"]))
-                ws.cell(rr, 3, round(_tot, 1))
+                numcell(ws, rr, 3, _tot)
                 for j, cu in enumerate(custs, 4):
                     c = row["cells"].get(cu["id"], {"v": 0, "src": "model"})
-                    cell = ws.cell(rr, j, round(c["v"], 1))
-                    if row["actual"]: cell.fill = GRAY
-                    elif c["src"] == "override": cell.fill = ORANGE
-        from openpyxl.utils import get_column_letter as gl
-        # Other (unnamed Direct) column just after the named customers
-        oc = 4 + len(custs)
-        ws.cell(2, oc, "Other (unnamed)").font = HDR
-        for i, row in enumerate(rows):
-            other = row.get("other", 0)
-            cell = ws.cell(3 + i, oc, round(other, 1))
-            if row["actual"]: cell.fill = GRAY
+                    fill = GRAY if row["actual"] else (ORANGE if c["src"] == "override" else None)
+                    numcell(ws, rr, j, c["v"], fill)
+            numcell(ws, rr, oc, row.get("other", 0), GRAY if row["actual"] else None)
         tr = 3 + len(rows)
         for j in range(3, 5 + len(custs)):
-            ws.cell(tr, j, f"=SUM({gl(j)}3:{gl(j)}{tr-1})").font = HDR
-        # reconciled note
-        ws.cell(1, oc, "= ties to channel Direct residual").font = Font(italic=True, color="595959")
+            c = ws.cell(tr, j, f"=SUM({gl(j)}3:{gl(j)}{tr-1})"); c.font = HDR; c.number_format = NUMFMT
+        # note WITHOUT leading '=' (that caused #NAME?); put as plain text with a colon
+        ws.cell(1, oc, "Other: ties to channel Direct residual").font = Font(italic=True, color="595959")
         ws.freeze_panes = "D3"
         for col in range(1, 6 + len(custs)): ws.column_dimensions[gl(col)].width = 13
         ws.column_dimensions["A"].width = 7; ws.column_dimensions["B"].width = 7
+
+    def total_sheet(ws, mode):
+        """A combined Total sheet. atl_mx: monthly + Q totals per DC + returns/acc/dummy.
+        direct: monthly + Q totals per country + Other."""
+        ws["A1"] = pct_lbl + "  -  TOTAL"; ws["A1"].font = NAVY
+        S = m["summary"]
+        if mode == "atl_mx":
+            dcs = [("ATL", "Atlanta"), ("MX", "Mexico"), ("DIRECT", "Direct")]
+            cols = ["Month", "Atlanta", "Mexico", "Direct", "Grand total"]
+            for j, h in enumerate(cols, 1): ws.cell(2, j, h).font = HDR
+            months = sorted({mo for dc, _ in dcs for mo in S[dc]["months"]})
+            r = 3
+            for mo in months:
+                ws.cell(r, 1, MN[mo])
+                vals = [S[dc]["months"].get(mo, {}).get("gross", 0) for dc, _ in dcs]
+                for j, v in enumerate(vals, 2): numcell(ws, r, j, v)
+                numcell(ws, r, 5, sum(vals), bold=True); r += 1
+            ws.cell(r, 1, "Q total").font = HDR
+            qvals = [S[dc]["total"].get("gross", 0) for dc, _ in dcs]
+            for j, v in enumerate(qvals, 2): numcell(ws, r, j, v, bold=True)
+            numcell(ws, r, 5, sum(qvals), bold=True); r += 2
+            # QTD / to-go
+            ws.cell(r, 1, "QTD actual").font = HDR
+            for j, (dc, _) in enumerate(dcs, 2): numcell(ws, r, j, S[dc]["qtd"].get("gross", 0))
+            r += 1
+            ws.cell(r, 1, "To go").font = HDR
+            for j, (dc, _) in enumerate(dcs, 2): numcell(ws, r, j, S[dc]["togo"].get("gross", 0))
+            r += 2
+            # product lines total (ATL+MX)
+            ws.cell(r, 1, "Product lines (ATL+MX)").font = NAVY; r += 1
+            for lbl, key in [("Accessories", "acc"), ("Returns", "ret"), ("Dummies", "dummy"),
+                             ("RW", "rw"), ("Nuance", "nuance"), ("OW", "ow")]:
+                ws.cell(r, 1, lbl)
+                numcell(ws, r, 2, S["ATL"]["total"].get(key, 0))
+                numcell(ws, r, 3, S["MX"]["total"].get(key, 0))
+                numcell(ws, r, 5, S["ATL"]["total"].get(key, 0) + S["MX"]["total"].get(key, 0), bold=True)
+                r += 1
+        else:
+            countries = [("IT", "Italy"), ("CN", "China"), ("TH", "Thailand")]
+            cols = ["Month", "Italy", "China", "Thailand", "Total Direct"]
+            for j, h in enumerate(cols, 1): ws.cell(2, j, h).font = HDR
+            months = sorted({mo for dc, _ in countries for mo in S[dc]["months"]})
+            r = 3
+            for mo in months:
+                ws.cell(r, 1, MN[mo])
+                vals = [S[dc]["months"].get(mo, {}).get("gross", 0) for dc, _ in countries]
+                for j, v in enumerate(vals, 2): numcell(ws, r, j, v)
+                numcell(ws, r, 5, sum(vals), bold=True); r += 1
+            ws.cell(r, 1, "Q total").font = HDR
+            qvals = [S[dc]["total"].get("gross", 0) for dc, _ in countries]
+            for j, v in enumerate(qvals, 2): numcell(ws, r, j, v, bold=True)
+            numcell(ws, r, 5, sum(qvals), bold=True); r += 2
+            rec = m.get("direct_recon", {})
+            ws.cell(r, 1, "Reconciliation").font = NAVY; r += 1
+            for lbl, key in [("Named customers", "named_total"), ("Other (unnamed)", "other_total"),
+                             ("Channel Direct residual", "residual_total")]:
+                ws.cell(r, 1, lbl); numcell(ws, r, 5, rec.get(key, 0), bold=True); r += 1
+        for col in range(1, 6): ws.column_dimensions[get_column_letter(col)].width = 16
 
     if which == "atl_mx":
         channel_sheet(wb.create_sheet("Atlanta"), "ATL")
         channel_sheet(wb.create_sheet("Mexico"), "MX")
         channel_sheet(wb.create_sheet("Direct"), "DIRECT")
+        total_sheet(wb.create_sheet("Total"), "atl_mx")
         fname = f"Atlanta Mexico {m['cycle']['label']} {m['version']['week_tag']}.xlsx"
     else:
         customer_sheet(wb.create_sheet("Italy"), "IT")
         customer_sheet(wb.create_sheet("China"), "CN")
         customer_sheet(wb.create_sheet("Thailand"), "TH")
         customer_sheet(wb.create_sheet("Total Direct"), "ALL")
+        total_sheet(wb.create_sheet("Total"), "direct")
         fname = f"Direct {m['cycle']['label']} {m['version']['week_tag']}.xlsx"
     buf = io.BytesIO(); wb.save(buf); buf.seek(0)
     return StreamingResponse(buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -1253,7 +1353,6 @@ def set_cutoff(vid: int, payload: dict = Body(...)):
     set_setting(f"cutoff_v{vid}", payload.get("cutoff"))
     return {"ok": True}
 
-from fastapi import Header
 
 @app.get("/auth/status")
 def auth_status():
