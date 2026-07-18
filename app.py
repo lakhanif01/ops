@@ -4,15 +4,15 @@ FastAPI on Hugging Face Spaces · Supabase/PostgREST schema `ops` · memory demo
 """
 import os, io, json, re, time, datetime, hashlib, secrets
 from collections import defaultdict
-from typing import Optional, Any
+from typing import Optional, List, Any
 
 import httpx
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Query, Body, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
 
-__version__ = "1.4.0"
-BUILD = "2026-07-18-8"
+__version__ = "1.5.0"
+BUILD = "2026-07-18-9"
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
 SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_KEY") or os.environ.get("SUPABASE_KEY", "")
@@ -531,17 +531,31 @@ async def import_actuals(file: UploadFile = File(...), version_id: int = Form(..
     return _commit_or_preview(commit, "ACTUALS", file.filename, preview, do_commit)
 
 @app.post("/import/history")
-async def import_history(file: UploadFile = File(...), commit: bool = Form(False), authorization: Optional[str] = Header(None)):
+async def import_history(files: List[UploadFile] = File(None), file: UploadFile = File(None),
+                         commit: bool = Form(False), authorization: Optional[str] = Header(None)):
     require_role(authorization, ('admin','planner'))
+    # accept either a single 'file' or many 'files'
+    uploads = [f for f in (files or []) if f is not None]
+    if file is not None: uploads.append(file)
+    if not uploads: raise HTTPException(400, "No file(s) provided")
     """Historical BO 'All Channels Data' export (any months/quarters — e.g. a rolling 6-month pull).
     Feeds the trailing-window penetration suggest for channels AND customers.
     Customer rows are matched by name/alias against Commercial Entity: Name — matches are counted in the
     preview so you can confirm before committing (auto-map + confirm, never silent)."""
-    data = await file.read()
     aliases = DB.select("plant_alias")
     cot_map = {r["cot"]: r["channel_code"] for r in DB.select("cot_alias")}
-    agg, cust_raw, unmapped_cot, unmapped_plant, nrows = parse_all_channels(
-        data, file.filename, aliases, cot_map, month_filter=None, want_entity=True)
+    agg, cust_raw = defaultdict(float), defaultdict(float)
+    unmapped_cot, unmapped_plant = set(), set()
+    nrows = 0
+    filenames = []
+    for uf in uploads:
+        data = await uf.read()
+        filenames.append(uf.filename)
+        a, c, uc, up2, nr = parse_all_channels(data, uf.filename, aliases, cot_map,
+                                               month_filter=None, want_entity=True)
+        for k, v in a.items(): agg[k] += v
+        for k, v in c.items(): cust_raw[k] += v
+        unmapped_cot |= uc; unmapped_plant |= up2; nrows += nr
     # customer matching: longest customer name/alias contained in the entity name wins
     matchers = []
     for c in DB.select("customer"):
@@ -560,7 +574,7 @@ async def import_history(file: UploadFile = File(...), commit: bool = Form(False
     months_seen = sorted({(yr, mo) for (yr, mo, wk, dc, ch, k) in agg})
     top_unmatched = sorted(unmatched.items(), key=lambda x: -abs(x[1]))[:15]
     id2name = {c["id"]: c["name"] for c in DB.select("customer")}
-    preview = {"rows_read": nrows, "months": [f"{y}-{m:02d}" for y, m in months_seen],
+    preview = {"rows_read": nrows, "files": filenames, "months": [f"{y}-{m:02d}" for y, m in months_seen],
                "channel_cells": len(agg), "customer_cells": len(cust_agg),
                "customer_matches": {id2name.get(cid, cid): n for cid, n in
                                     sorted(matched_entities.items(), key=lambda x: -x[1])},
@@ -574,7 +588,7 @@ async def import_history(file: UploadFile = File(...), commit: bool = Form(False
                  for (yr, mo, wk, dc, cid), u in cust_agg.items()]
         DB.upsert("history_customer", crows, ["year", "month_no", "week_no", "dc_code", "customer_id"])
         return {"rows": len(rows) + len(crows), "meta": preview}
-    return _commit_or_preview(commit, "HISTORY", file.filename, preview, do_commit)
+    return _commit_or_preview(commit, "HISTORY", ", ".join(filenames), preview, do_commit)
 
 @app.post("/import/accessories")
 async def import_accessories(file: UploadFile = File(...), version_id: int = Form(...), commit: bool = Form(False), authorization: Optional[str] = Header(None)):
@@ -747,51 +761,60 @@ def set_pen(payload: dict = Body(...)):
     DB.upsert("penetration", rows, ["version_id", "dc_code", "target_kind", "target_key"])
     return {"ok": True, "count": len(rows)}
 
+def _recency_weighted(hist_rows, key_fn, val_fn, latest_ym):
+    """Recency-weighted sums. weight = 0.85^(months_ago). Returns dict key -> weighted units."""
+    out = defaultdict(float)
+    ly, lm = latest_ym
+    for h in hist_rows:
+        age = (ly * 12 + lm) - (h["year"] * 12 + h["month_no"])
+        if age < 0: continue
+        w = 0.85 ** age
+        out[key_fn(h)] += val_fn(h) * w
+    return out
+
 @app.get("/penetration/suggest")
-def suggest_pen(version_id: int, months: int = 6):
-    """Trailing-window suggestions from imported history (falls back to current-cycle actuals if no history).
-    Channel: DC share of total net units per channel. Customer: country share of that customer's total.
-    Never auto-applies — the frontend previews drift, then the user clicks Apply."""
+def suggest_pen(version_id: int, months: int = 0):
+    """Recency-weighted penetration from ALL imported history (0.85^months_ago).
+    months=0 means use everything (recommended); a positive value caps the window.
+    Channel: DC share of total per channel. Customer: country share of that customer.
+    Never auto-applies — frontend previews drift, user clicks Apply."""
     v = DB.select("version", {"id": version_id})
     if not v: raise HTTPException(404, "version not found")
-    hist = DB.select("history")
-    basis = f"trailing {months} months of imported history"
+    hist = [h for h in DB.select("history") if h["kind"] == "GROSS" and h["channel_code"]]
+    basis = "recency-weighted over all imported history"
     if hist:
         latest = max((h["year"], h["month_no"]) for h in hist)
-        lo = latest[0] * 12 + latest[1] - (months - 1)
-        hist = [h for h in hist if h["year"] * 12 + h["month_no"] >= lo and h["kind"] == "GROSS"]
-        tot, per_dc = defaultdict(float), defaultdict(float)
-        for h in hist:
-            if not h["channel_code"]: continue
-            tot[h["channel_code"]] += h["units"]
-            per_dc[(h["dc_code"], h["channel_code"])] += h["units"]
+        if months > 0:
+            lo = latest[0] * 12 + latest[1] - (months - 1)
+            hist = [h for h in hist if h["year"] * 12 + h["month_no"] >= lo]
+            basis = f"recency-weighted over last {months} months"
+        tot = _recency_weighted(hist, lambda h: h["channel_code"], lambda h: h["units"], latest)
+        per_dc = _recency_weighted(hist, lambda h: (h["dc_code"], h["channel_code"]), lambda h: h["units"], latest)
     else:
         basis = "current cycle QTD (no history imported yet)"
         acts = DB.select("actual", {"cycle_id": v[0]["cycle_id"]})
         tot, per_dc = defaultdict(float), defaultdict(float)
         for a in acts:
             if a["kind"] != "GROSS" or not a["channel_code"]: continue
-            tot[a["channel_code"]] += a["units"]
-            per_dc[(a["dc_code"], a["channel_code"])] += a["units"]
+            tot[a["channel_code"]] += a["units"]; per_dc[(a["dc_code"], a["channel_code"])] += a["units"]
     out = [{"dc_code": dc, "target_kind": "CHANNEL", "target_key": ch, "pct": round(u / tot[ch], 4)}
            for (dc, ch), u in per_dc.items() if tot[ch] > 0]
-    # customer suggestions from history_customer
     ch_hist = DB.select("history_customer")
     cust_out = []
     if ch_hist:
         latest = max((h["year"], h["month_no"]) for h in ch_hist)
-        lo = latest[0] * 12 + latest[1] - (months - 1)
-        ch_hist = [h for h in ch_hist if h["year"] * 12 + h["month_no"] >= lo]
-        ctot, cdc = defaultdict(float), defaultdict(float)
-        for h in ch_hist:
-            ctot[h["customer_id"]] += h["units"]
-            cdc[(h["dc_code"], h["customer_id"])] += h["units"]
+        if months > 0:
+            lo = latest[0] * 12 + latest[1] - (months - 1)
+            ch_hist = [h for h in ch_hist if h["year"] * 12 + h["month_no"] >= lo]
+        ctot = _recency_weighted(ch_hist, lambda h: h["customer_id"], lambda h: h["units"], latest)
+        cdc = _recency_weighted(ch_hist, lambda h: (h["dc_code"], h["customer_id"]), lambda h: h["units"], latest)
         for (dc, cid), u in cdc.items():
             if dc in ("IT", "CN", "TH") and ctot[cid] > 0:
                 cust_out.append({"dc_code": dc, "target_kind": "CUSTOMER", "target_key": str(cid),
                                  "pct": round(u / ctot[cid], 4)})
+    n_months = len({(h["year"], h["month_no"]) for h in hist}) if hist else 0
     return {"suggestions": out, "customer_suggestions": cust_out, "basis": basis,
-            "history_loaded": bool(hist or ch_hist)}
+            "history_loaded": bool(hist or ch_hist), "months_of_history": n_months}
 
 @app.get("/rates")
 def get_rates(version_id: int):
@@ -1459,15 +1482,16 @@ def rates_suggest(version_id: int, months: int = 6):
     v = DB.select("version", {"id": version_id})
     if not v: raise HTTPException(404, "version not found")
     hist = DB.select("history")
-    src_label = f"trailing {months} months of history"
+    src_label = "recency-weighted over all history"
     gross = defaultdict(float); ret = defaultdict(float); acc = defaultdict(float)
     if hist:
         latest = max((h["year"], h["month_no"]) for h in hist)
-        lo = latest[0] * 12 + latest[1] - (months - 1)
         for h in hist:
-            if h["year"] * 12 + h["month_no"] < lo: continue
-            if h["kind"] == "GROSS": gross[h["dc_code"]] += h["units"]
-            elif h["kind"] == "RETURN": ret[h["dc_code"]] += h["units"]
+            age = (latest[0]*12+latest[1]) - (h["year"]*12+h["month_no"])
+            if age < 0: continue
+            w = 0.85 ** age
+            if h["kind"] == "GROSS": gross[h["dc_code"]] += h["units"] * w
+            elif h["kind"] == "RETURN": ret[h["dc_code"]] += h["units"] * w
         # accessories aren't in history table; use current-cycle actuals for acc ratio
     acts = DB.select("actual", {"cycle_id": v[0]["cycle_id"]})
     cyc_gross = defaultdict(float)
@@ -1508,49 +1532,44 @@ def dummy_suggest(version_id: int, weeks: int = 26):
 
 @app.get("/drilldown")
 def drilldown(version_id: int):
-    """Hierarchical explorer data (KA-style). Returns a flat fact list with every dimension on each row;
-    the frontend builds the reorderable, expandable tree and computes CY (this version) vs LY (history same weeks).
-    Measures: gross(frames), and product lines. CY = actuals(closed) + forecast(open)."""
+    """To-Date / To-Go hierarchical drilldown (no year-over-year).
+    TD = actualized (closed) weeks; TG = forecast (open) weeks. Flat facts; frontend builds the tree."""
     m = compute_model(version_id)
     periods = {p["id"]: p for p in m["periods"]}
+    act_set = set(m["actualized_periods"])
     ch_names = {c["code"]: c["name"] for c in m["channels"]}
     MN = ["", "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
-    cyc = m["cycle"]
-    # LY lookup from history: same month+week, prior year, by DC+channel gross
-    hist = DB.select("history")
-    ly = defaultdict(float)
-    ly_year = cyc["year"] - 1
-    for h in hist:
-        if h["year"] == ly_year and h["kind"] == "GROSS" and h["channel_code"]:
-            ly[(h["month_no"], h["week_no"], h["dc_code"], h["channel_code"])] += h["units"]
     facts = []
+    def add(dc, mo, wk, product, channel, td, tg):
+        if abs(td) < 0.5 and abs(tg) < 0.5: return
+        facts.append({"half": ("H1" if mo <= 6 else "H2"), "quarter": f"Q{(mo-1)//3+1}",
+                      "month": MN[mo], "month_no": mo, "week": f"W{wk}", "dc": dc,
+                      "product": product, "channel": channel, "td": round(td), "tg": round(tg)})
     for dc in ("ATL", "MX", "DIRECT"):
         for r in m["grids"][dc]["rows"]:
             per = periods[r["period_id"]]; mo, wk = per["month_no"], per["week_no"]
-            half = "H1" if mo <= 6 else "H2"
-            qtr = f"Q{(mo-1)//3+1}"
+            is_act = r["period_id"] in act_set
             for c in m["channels"]:
-                cy = r["cells"][c["code"]]["v"]
-                lyv = ly.get((mo, wk, dc, c["code"]), 0.0) if dc != "DIRECT" else \
-                      sum(ly.get((mo, wk, d, c["code"]), 0.0) for d in ("IT", "CN", "TH"))
-                if abs(cy) < 0.5 and abs(lyv) < 0.5: continue
-                facts.append({"half": half, "quarter": qtr, "month": MN[mo], "month_no": mo,
-                              "week": f"W{wk}", "dc": dc, "product": "Frames",
-                              "channel": ch_names[c["code"]], "cy": round(cy), "ly": round(lyv)})
-            # product lines (no channel split)
+                v = r["cells"][c["code"]]["v"]
+                add(dc, mo, wk, "Frames", ch_names[c["code"]], v if is_act else 0, 0 if is_act else v)
             if dc != "DIRECT":
                 for prod, val in [("Accessories", r["acc"]), ("Returns", r["ret"]), ("Dummies", r["dummy"]),
                                   ("RW", r["rw"]), ("Nuance", r["nuance"]), ("OW", r["ow"])]:
-                    if abs(val) < 0.5: continue
-                    facts.append({"half": half, "quarter": qtr, "month": MN[mo], "month_no": mo,
-                                  "week": f"W{wk}", "dc": dc, "product": prod, "channel": "-",
-                                  "cy": round(val), "ly": 0})
+                    add(dc, mo, wk, prod, "-", val if is_act else 0, 0 if is_act else val)
+            else:
+                add(dc, mo, wk, "Meta RW", "-", r.get("meta_rw", 0) if is_act else 0, 0 if is_act else r.get("meta_rw", 0))
+                add(dc, mo, wk, "Meta OW", "-", r.get("meta_ow", 0) if is_act else 0, 0 if is_act else r.get("meta_ow", 0))
+    for dc in ("IT", "CN", "TH"):
+        for r in m["customer_grid"]["countries"][dc]["rows"]:
+            per = periods[r["period_id"]]; mo, wk = per["month_no"], per["week_no"]
+            is_act = r["actual"]
+            g = (r.get("actual_total") if is_act and r.get("actual_total") is not None
+                 else r.get("reconciled_total", r["total"]))
+            add(dc, mo, wk, "Frames", "all", g if is_act else 0, 0 if is_act else g)
     return {"facts": facts,
             "dimensions": ["half", "quarter", "month", "week", "dc", "product", "channel"],
             "dim_labels": {"half": "Half", "quarter": "Quarter", "month": "Month", "week": "Week",
-                           "dc": "DC", "product": "Product", "channel": "Channel"},
-            "cy_year": cyc["year"], "ly_year": ly_year,
-            "has_ly": bool(hist)}
+                           "dc": "DC", "product": "Product", "channel": "Channel"}}
 
 @app.post("/validate/legacy_export")
 async def validate_legacy_export(file: UploadFile = File(...), version_id: int = Form(...),
