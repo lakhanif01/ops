@@ -12,7 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
 
 __version__ = "1.5.0"
-BUILD = "2026-07-18-9"
+BUILD = "2026-07-18-10"
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
 SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_KEY") or os.environ.get("SUPABASE_KEY", "")
@@ -1540,36 +1540,42 @@ def drilldown(version_id: int):
     ch_names = {c["code"]: c["name"] for c in m["channels"]}
     MN = ["", "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
     facts = []
-    def add(dc, mo, wk, product, channel, td, tg):
+    CNAME = {"IT": "Italy", "CN": "China", "TH": "Thailand", "": ""}
+    def add(dc, country, mo, wk, product, channel, td, tg):
         if abs(td) < 0.5 and abs(tg) < 0.5: return
         facts.append({"half": ("H1" if mo <= 6 else "H2"), "quarter": f"Q{(mo-1)//3+1}",
                       "month": MN[mo], "month_no": mo, "week": f"W{wk}", "dc": dc,
+                      "country": CNAME.get(country, country) or "Direct (RW/OW)",
                       "product": product, "channel": channel, "td": round(td), "tg": round(tg)})
-    for dc in ("ATL", "MX", "DIRECT"):
+    # ATL and MX: full channel + product detail, country not applicable
+    for dc in ("ATL", "MX"):
         for r in m["grids"][dc]["rows"]:
             per = periods[r["period_id"]]; mo, wk = per["month_no"], per["week_no"]
             is_act = r["period_id"] in act_set
             for c in m["channels"]:
                 v = r["cells"][c["code"]]["v"]
-                add(dc, mo, wk, "Frames", ch_names[c["code"]], v if is_act else 0, 0 if is_act else v)
-            if dc != "DIRECT":
-                for prod, val in [("Accessories", r["acc"]), ("Returns", r["ret"]), ("Dummies", r["dummy"]),
-                                  ("RW", r["rw"]), ("Nuance", r["nuance"]), ("OW", r["ow"])]:
-                    add(dc, mo, wk, prod, "-", val if is_act else 0, 0 if is_act else val)
-            else:
-                add(dc, mo, wk, "Meta RW", "-", r.get("meta_rw", 0) if is_act else 0, 0 if is_act else r.get("meta_rw", 0))
-                add(dc, mo, wk, "Meta OW", "-", r.get("meta_ow", 0) if is_act else 0, 0 if is_act else r.get("meta_ow", 0))
-    for dc in ("IT", "CN", "TH"):
-        for r in m["customer_grid"]["countries"][dc]["rows"]:
+                add(dc, "", mo, wk, "Frames", ch_names[c["code"]], v if is_act else 0, 0 if is_act else v)
+            for prod, val in [("Accessories", r["acc"]), ("Returns", r["ret"]), ("Dummies", r["dummy"]),
+                              ("RW", r["rw"]), ("Nuance", r["nuance"]), ("OW", r["ow"])]:
+                add(dc, "", mo, wk, prod, "-", val if is_act else 0, 0 if is_act else val)
+    # DIRECT: the country split (IT/CN/TH) IS the Direct frames breakdown — emit under dc="DIRECT" with country.
+    for country in ("IT", "CN", "TH"):
+        for r in m["customer_grid"]["countries"][country]["rows"]:
             per = periods[r["period_id"]]; mo, wk = per["month_no"], per["week_no"]
             is_act = r["actual"]
             g = (r.get("actual_total") if is_act and r.get("actual_total") is not None
                  else r.get("reconciled_total", r["total"]))
-            add(dc, mo, wk, "Frames", "all", g if is_act else 0, 0 if is_act else g)
+            add("DIRECT", country, mo, wk, "Frames", "all", g if is_act else 0, 0 if is_act else g)
+    # DIRECT meta lines (RW/OW) — not country-split, sit directly under DIRECT
+    for r in m["grids"]["DIRECT"]["rows"]:
+        per = periods[r["period_id"]]; mo, wk = per["month_no"], per["week_no"]
+        is_act = r["period_id"] in act_set
+        add("DIRECT", "", mo, wk, "Meta RW", "-", r.get("meta_rw", 0) if is_act else 0, 0 if is_act else r.get("meta_rw", 0))
+        add("DIRECT", "", mo, wk, "Meta OW", "-", r.get("meta_ow", 0) if is_act else 0, 0 if is_act else r.get("meta_ow", 0))
     return {"facts": facts,
-            "dimensions": ["half", "quarter", "month", "week", "dc", "product", "channel"],
+            "dimensions": ["half", "quarter", "month", "week", "dc", "country", "product", "channel"],
             "dim_labels": {"half": "Half", "quarter": "Quarter", "month": "Month", "week": "Week",
-                           "dc": "DC", "product": "Product", "channel": "Channel"}}
+                           "dc": "DC", "country": "Country", "product": "Product", "channel": "Channel"}}
 
 @app.post("/validate/legacy_export")
 async def validate_legacy_export(file: UploadFile = File(...), version_id: int = Form(...),
