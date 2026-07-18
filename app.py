@@ -12,7 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
 
 __version__ = "1.4.0"
-BUILD = "2026-07-18-6"
+BUILD = "2026-07-18-7"
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
 SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_KEY") or os.environ.get("SUPABASE_KEY", "")
@@ -1409,47 +1409,49 @@ def dummy_suggest(version_id: int, weeks: int = 26):
 
 @app.get("/drilldown")
 def drilldown(version_id: int):
-    """QTD (actual) and QTG (to-go forecast) broken down by DC x Month x Product x Channel.
-    Product = frames(gross) | returns | accessories | dummies | rw | ow | nuance | goggles(subset of frames)."""
+    """Hierarchical explorer data (KA-style). Returns a flat fact list with every dimension on each row;
+    the frontend builds the reorderable, expandable tree and computes CY (this version) vs LY (history same weeks).
+    Measures: gross(frames), and product lines. CY = actuals(closed) + forecast(open)."""
     m = compute_model(version_id)
     periods = {p["id"]: p for p in m["periods"]}
-    act_set = set(m["actualized_periods"])
     ch_names = {c["code"]: c["name"] for c in m["channels"]}
     MN = ["", "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
-    rows = []   # each: dc, month, product, channel, qtd, qtg
-    def add(dc, mo, product, channel, qtd, qtg):
-        if abs(qtd) < 0.5 and abs(qtg) < 0.5: return
-        rows.append({"dc": dc, "month": MN[mo], "month_no": mo, "product": product,
-                     "channel": channel, "qtd": round(qtd), "qtg": round(qtg)})
+    cyc = m["cycle"]
+    # LY lookup from history: same month+week, prior year, by DC+channel gross
+    hist = DB.select("history")
+    ly = defaultdict(float)
+    ly_year = cyc["year"] - 1
+    for h in hist:
+        if h["year"] == ly_year and h["kind"] == "GROSS" and h["channel_code"]:
+            ly[(h["month_no"], h["week_no"], h["dc_code"], h["channel_code"])] += h["units"]
+    facts = []
     for dc in ("ATL", "MX", "DIRECT"):
         for r in m["grids"][dc]["rows"]:
-            mo = periods[r["period_id"]]["month_no"]
-            is_act = r["period_id"] in act_set
+            per = periods[r["period_id"]]; mo, wk = per["month_no"], per["week_no"]
+            half = "H1" if mo <= 6 else "H2"
+            qtr = f"Q{(mo-1)//3+1}"
             for c in m["channels"]:
-                v = r["cells"][c["code"]]["v"]
-                add(dc, mo, "Frames", ch_names[c["code"]], v if is_act else 0, 0 if is_act else v)
+                cy = r["cells"][c["code"]]["v"]
+                lyv = ly.get((mo, wk, dc, c["code"]), 0.0) if dc != "DIRECT" else \
+                      sum(ly.get((mo, wk, d, c["code"]), 0.0) for d in ("IT", "CN", "TH"))
+                if abs(cy) < 0.5 and abs(lyv) < 0.5: continue
+                facts.append({"half": half, "quarter": qtr, "month": MN[mo], "month_no": mo,
+                              "week": f"W{wk}", "dc": dc, "product": "Frames",
+                              "channel": ch_names[c["code"]], "cy": round(cy), "ly": round(lyv)})
+            # product lines (no channel split)
             if dc != "DIRECT":
-                add(dc, mo, "Accessories", "-", r["acc"] if is_act else 0, 0 if is_act else r["acc"])
-                add(dc, mo, "Returns", "-", r["ret"] if is_act else 0, 0 if is_act else r["ret"])
-                add(dc, mo, "Dummies", "-", r["dummy"] if is_act else 0, 0 if is_act else r["dummy"])
-                add(dc, mo, "RW", "-", r["rw"] if is_act else 0, 0 if is_act else r["rw"])
-                add(dc, mo, "Nuance", "-", r["nuance"] if is_act else 0, 0 if is_act else r["nuance"])
-                add(dc, mo, "OW", "-", r["ow"] if is_act else 0, 0 if is_act else r["ow"])
-            else:
-                add(dc, mo, "Meta RW", "-", r.get("meta_rw", 0) if is_act else 0, 0 if is_act else r.get("meta_rw", 0))
-                add(dc, mo, "Meta OW", "-", r.get("meta_ow", 0) if is_act else 0, 0 if is_act else r.get("meta_ow", 0))
-    # country level frames
-    for dc in ("IT", "CN", "TH"):
-        for r in m["customer_grid"]["countries"][dc]["rows"]:
-            mo = periods[r["period_id"]]["month_no"]
-            is_act = r["actual"]
-            g = (r.get("actual_total") if is_act and r.get("actual_total") is not None
-                 else r.get("reconciled_total", r["total"]))
-            add(dc, mo, "Frames", "all", g if is_act else 0, 0 if is_act else g)
-    tot_qtd = sum(r["qtd"] for r in rows); tot_qtg = sum(r["qtg"] for r in rows)
-    return {"rows": rows, "totals": {"qtd": round(tot_qtd), "qtg": round(tot_qtg)},
-            "dcs": ["ATL", "MX", "DIRECT", "IT", "CN", "TH"],
-            "products": ["Frames", "Goggles", "Accessories", "Returns", "Dummies", "RW", "OW", "Nuance", "Meta RW", "Meta OW"]}
+                for prod, val in [("Accessories", r["acc"]), ("Returns", r["ret"]), ("Dummies", r["dummy"]),
+                                  ("RW", r["rw"]), ("Nuance", r["nuance"]), ("OW", r["ow"])]:
+                    if abs(val) < 0.5: continue
+                    facts.append({"half": half, "quarter": qtr, "month": MN[mo], "month_no": mo,
+                                  "week": f"W{wk}", "dc": dc, "product": prod, "channel": "-",
+                                  "cy": round(val), "ly": 0})
+    return {"facts": facts,
+            "dimensions": ["half", "quarter", "month", "week", "dc", "product", "channel"],
+            "dim_labels": {"half": "Half", "quarter": "Quarter", "month": "Month", "week": "Week",
+                           "dc": "DC", "product": "Product", "channel": "Channel"},
+            "cy_year": cyc["year"], "ly_year": ly_year,
+            "has_ly": bool(hist)}
 
 @app.post("/validate/legacy_export")
 async def validate_legacy_export(file: UploadFile = File(...), version_id: int = Form(...),
