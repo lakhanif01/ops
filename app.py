@@ -12,14 +12,22 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
 
 __version__ = "1.3.0"
-BUILD = "2026-07-18-3"
+BUILD = "2026-07-18-4"
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
 SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_KEY") or os.environ.get("SUPABASE_KEY", "")
 SCHEMA = "ops"
 
 app = FastAPI(title="OPS DC Ship Forecast", version=__version__)
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_origin_regex=".*",
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=["*"],
+)
 
 # ------------------------------------------------------------------
 # DB layer — PostgREST client with in-memory fallback (demo/test mode)
