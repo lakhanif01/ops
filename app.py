@@ -11,8 +11,8 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Query, Body,
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
 
-__version__ = "1.5.1"
-BUILD = "2026-07-18-13"
+__version__ = "1.5.2"
+BUILD = "2026-07-18-14"
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
 SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_KEY") or os.environ.get("SUPABASE_KEY", "")
@@ -395,6 +395,40 @@ def version_periods(vid: int):
 # ------------------------------------------------------------------
 # imports
 # ------------------------------------------------------------------
+def _clear_import(kind, version_id=None, cycle_id=None):
+    """Clean-replace: remove existing rows for a given import type before re-committing.
+    Scoped precisely so other imports/actuals are never touched."""
+    if kind == "NA" and version_id is not None:
+        DB.delete("forecast_channel", {"version_id": version_id})
+    elif kind == "CUSTFC" and version_id is not None:
+        DB.delete("forecast_customer", {"version_id": version_id})
+    elif kind in ("ACTUALS", "ACC", "DUMMY") and cycle_id is not None:
+        # actual table shares one table across kinds — delete only the matching kind(s)
+        if kind == "ACTUALS":
+            for k in ("GROSS", "RETURN"):
+                DB.delete("actual", {"cycle_id": cycle_id, "kind": k})
+        elif kind == "ACC":
+            DB.delete("actual", {"cycle_id": cycle_id, "kind": "ACC"})
+        elif kind == "DUMMY":
+            DB.delete("actual", {"cycle_id": cycle_id, "kind": "DUMMY"})
+
+def _already_imported(kind, version_id=None, cycle_id=None):
+    """Has this import type already been committed for this cycle/version?"""
+    try:
+        if kind == "NA" and version_id is not None:
+            return len(DB.select("forecast_channel", {"version_id": version_id})) > 0
+        if kind == "CUSTFC" and version_id is not None:
+            return len(DB.select("forecast_customer", {"version_id": version_id})) > 0
+        if kind == "ACTUALS" and cycle_id is not None:
+            return any(a["kind"] in ("GROSS", "RETURN") for a in DB.select("actual", {"cycle_id": cycle_id}))
+        if kind == "ACC" and cycle_id is not None:
+            return any(a["kind"] == "ACC" for a in DB.select("actual", {"cycle_id": cycle_id}))
+        if kind == "DUMMY" and cycle_id is not None:
+            return any(a["kind"] == "DUMMY" for a in DB.select("actual", {"cycle_id": cycle_id}))
+    except Exception:
+        pass
+    return False
+
 def _commit_or_preview(commit, kind, filename, rows_payload, do_commit):
     if not commit:
         return {"preview": True, **rows_payload}
@@ -442,9 +476,11 @@ async def import_na(file: UploadFile = File(...), version_id: int = Form(...), c
     ch_codes = [c["code"] for c in DB.select("channel")]
     totals = {c: round(sum(g.get(c, 0) for g in grid.values())) for c in ch_codes + LINES}
     preview = {"periods": len(grid), "totals": totals,
-               "grand_total": round(sum(totals[c] for c in ch_codes))}
+               "grand_total": round(sum(totals[c] for c in ch_codes)),
+               "already_imported": _already_imported("NA", version_id=version_id)}
 
     def do_commit():
+        _clear_import("NA", version_id=version_id)   # clean replace
         rows = []
         for (mo, wk), vals in grid.items():
             per = ensure_period(cyc["id"], mo, wk)
@@ -543,8 +579,10 @@ async def import_actuals(file: UploadFile = File(...), version_id: int = Form(..
         if k == "GROSS": by_dc[dc] += u
     preview = {"rows_read": nrows, "cells": len(agg),
                "gross_by_dc": {k: round(v2) for k, v2 in sorted(by_dc.items())},
-               "unmapped_cot": sorted(unmapped_cot), "unmapped_plants": sorted(unmapped_plant)}
+               "unmapped_cot": sorted(unmapped_cot), "unmapped_plants": sorted(unmapped_plant),
+               "already_imported": _already_imported("ACTUALS", cycle_id=cyc["id"])}
     def do_commit():
+        _clear_import("ACTUALS", cycle_id=cyc["id"])   # clean replace (GROSS+RETURN only)
         rows = []
         for (yr, mo, wk, dc, ch, k), u in agg.items():
             per = ensure_period(cyc["id"], mo, wk)
@@ -643,10 +681,11 @@ async def import_accessories(file: UploadFile = File(...), version_id: int = For
         if mo not in q_months: continue
         dc = plant_to_dc(r[iPl], aliases)
         if dc: agg[(mo, wk, dc)] += num(r[iInv])
-    preview = {"cells": len(agg), "by_dc": {}}
+    preview = {"cells": len(agg), "by_dc": {}, "already_imported": _already_imported("ACC", cycle_id=cyc["id"])}
     for (mo, wk, dc), u in agg.items():
         preview["by_dc"][dc] = round(preview["by_dc"].get(dc, 0) + u)
     def do_commit():
+        _clear_import("ACC", cycle_id=cyc["id"])
         rows = [{"cycle_id": cyc["id"], "period_id": ensure_period(cyc["id"], mo, wk)["id"],
                  "dc_code": dc, "channel_code": "", "kind": "ACC", "units": u}
                 for (mo, wk, dc), u in agg.items()]
@@ -694,10 +733,11 @@ async def import_dummies(file: UploadFile = File(...), version_id: int = Form(..
         dc = plant_to_dc(r[iPl], aliases)
         if dc: agg[(mo, wk, dc)] += num(r[iU]) if iU is not None else 1
     preview = {"sheet": name, "cells": len(agg),
-               "by_dc": {}}
+               "by_dc": {}, "already_imported": _already_imported("DUMMY", cycle_id=cyc["id"])}
     for (mo, wk, dc), u in agg.items():
         preview["by_dc"][dc] = round(preview["by_dc"].get(dc, 0) + u)
     def do_commit():
+        _clear_import("DUMMY", cycle_id=cyc["id"])
         rows = [{"cycle_id": cyc["id"], "period_id": ensure_period(cyc["id"], mo, wk)["id"],
                  "dc_code": dc, "channel_code": "", "kind": "DUMMY", "units": u}
                 for (mo, wk, dc), u in agg.items()]
@@ -756,8 +796,10 @@ async def import_customers(file: UploadFile = File(...), version_id: int = Form(
     names = sorted({n for g in grid.values() for n in g})
     unknown = [n for n in names if n.upper() not in known and n.upper() not in alias_lookup]
     preview = {"sheet": ws.title, "periods": len(grid), "customers": names, "new_customers": unknown,
-               "total_units": round(sum(sum(g.values()) for g in grid.values()))}
+               "total_units": round(sum(sum(g.values()) for g in grid.values())),
+               "already_imported": _already_imported("CUSTFC", version_id=version_id)}
     def do_commit():
+        _clear_import("CUSTFC", version_id=version_id)
         for n in unknown:
             add_customer({"name": n})
         cmap = {c["name"].strip().upper(): c["id"] for c in DB.select("customer")}
