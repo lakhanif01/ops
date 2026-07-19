@@ -12,7 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
 
 __version__ = "1.5.0"
-BUILD = "2026-07-18-10"
+BUILD = "2026-07-18-12"
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
 SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_KEY") or os.environ.get("SUPABASE_KEY", "")
@@ -991,16 +991,20 @@ def compute_model(version_id: int):
                 for dc in ("IT", "CN", "TH")}
         for cu in customers:
             base = fcust.get((pid, cu["id"]), 0.0)
-            row["cells"][cu["id"]] = base
+            country_sum = 0.0     # ALL tab = sum of the country-allocated values (post-override)
+            any_override = False
             for dc in ("IT", "CN", "TH"):
                 val = penv(dc, "CUSTOMER", str(cu["id"])) * base
                 o = ovr_cu.get((dc, str(cu["id"]), pid))
                 src = "model"
-                if o: val, src = o["units"], "override"
+                if o: val, src = o["units"], "override"; any_override = True
                 if val < 0:
                     model["warnings"].append(f"Negative {dc} {cu['name']} {p['label']} = {round(val)} — reclass to Atlanta?")
                 crow[dc]["cells"][cu["id"]] = {"v": val, "src": src}
                 crow[dc]["total"] += val
+                country_sum += val
+            # ALL tab reflects the reallocated country totals, not the raw base
+            row["cells"][cu["id"]] = country_sum
         row["total"] = sum(row["cells"].values())
         cust_grid["rows"].append(row)
         for dc in ("IT", "CN", "TH"):
@@ -1020,18 +1024,24 @@ def compute_model(version_id: int):
         row["base_customer_total"] = row["total"]   # raw planner bottom-up (kept for reference)
         row["direct_residual"] = resid
         row["named_total"] = named
-        row["other"] = other
-        row["reconciled_total"] = named + other      # == resid by construction
+        row["other"] = max(other, 0.0)               # export DCs never negative
+        row["other_raw"] = other                      # keep the true plug for reconciliation/diagnostics
+        row["reconciled_total"] = named + row["other"]
         base = named
+        # Export DCs never carry negatives (Eleanor's rule: returns only through Atlanta).
+        # Floor the Other plug at 0 on country views; a negative plug means named customers
+        # over-allocated that week — that shortfall belongs to Atlanta, not an export DC.
+        other_export = max(other, 0.0)
         for dc in ("IT", "CN", "TH"):
             share = (country_named[dc] / base) if base > 0 else (1 / 3)
             crow = cust_grid["countries"][dc]["rows"][i]
-            crow["other"] = other * share
+            crow["other"] = other_export * share
             crow["reconciled_total"] = crow["total"] + crow["other"]
         if resid > 0 and abs(other) > 0.15 * resid:
+            floored = " (floored to 0 on export DCs — over-allocation stays in Atlanta)" if other < 0 else ""
             model["warnings"].append(
                 f"Direct mix gap: {row['label']} allocated {round(named)} vs residual {round(resid)} "
-                f"(Other {round(other):+d}) — review customer list/timing/%")
+                f"(Other {round(other):+d}){floored} — review customer list/timing/%")
 
     model["grids"] = grids
     model["customer_grid"] = cust_grid
@@ -1081,7 +1091,9 @@ def compute_model(version_id: int):
     model["direct_recon"] = {
         "named_total": round(sum(r["named_total"] for r in cust_grid["rows"])),
         "residual_total": round(sum(r["direct_residual"] for r in cust_grid["rows"])),
-        "other_total": round(sum(r["other"] for r in cust_grid["rows"])),
+        "other_total": round(sum(r["other"] for r in cust_grid["rows"])),          # floored (export view)
+        "other_raw_total": round(sum(r.get("other_raw", r["other"]) for r in cust_grid["rows"])),
+        "floored_to_atlanta": round(sum(r["other"] - r.get("other_raw", r["other"]) for r in cust_grid["rows"])),
     }
     for dc in ("IT", "CN", "TH"):
         model["summary"][dc] = summarize(
