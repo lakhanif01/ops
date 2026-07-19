@@ -11,8 +11,8 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Query, Body,
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
 
-__version__ = "1.5.0"
-BUILD = "2026-07-18-12"
+__version__ = "1.5.1"
+BUILD = "2026-07-18-13"
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
 SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_KEY") or os.environ.get("SUPABASE_KEY", "")
@@ -316,6 +316,30 @@ def patch_customer(cid: int, payload: dict = Body(...)):
     allowed = {k: v for k, v in payload.items() if k in ("name", "active", "sort", "aliases")}
     DB.update("customer", {"id": cid}, allowed)
     return {"ok": True}
+
+@app.post("/admin/remove_customer")
+def admin_remove_customer(payload: dict = Body(...), authorization: Optional[str] = Header(None)):
+    """Deactivate customer(s) by name (admin only). Additive/safe: sets active=False, never deletes rows.
+    Used to clean up stray entities like a country name mistakenly imported as a customer."""
+    require_role(authorization, ("admin",))
+    names = payload.get("names") or ([payload["name"]] if payload.get("name") else [])
+    targets = {str(n).strip().lower() for n in names}
+    removed = []
+    for c in DB.select("customer"):
+        if c["name"].strip().lower() in targets and c.get("active", True):
+            DB.update("customer", {"id": c["id"]}, {"active": False})
+            removed.append(c["name"])
+    return {"ok": True, "removed": removed}
+
+@app.get("/admin/stray_customers")
+def admin_stray_customers(authorization: Optional[str] = Header(None)):
+    """List customers whose names look like country/total headers (not real customers)."""
+    require_role(authorization, ("admin",))
+    BAD = {"italy", "china", "thailand", "direct", "total", "atlanta", "mexico",
+           "total italy", "total china", "total thailand", "total direct", "grand total", "sum"}
+    strays = [{"id": c["id"], "name": c["name"]} for c in DB.select("customer")
+              if c.get("active", True) and c["name"].strip().lower() in BAD]
+    return {"strays": strays}
 
 @app.post("/admin/cot_alias")
 def add_cot(payload: dict = Body(...)):
@@ -702,7 +726,9 @@ async def import_customers(file: UploadFile = File(...), version_id: int = Form(
         strs = [c for c in (r or [])[3:] if isinstance(c, str) and c.strip()]
         if len(strs) >= 3: hdr_i, hdr = i, list(r); break
     if hdr is None: raise HTTPException(400, "Could not locate customer header row")
-    SKIP = {"total", "direct", "total direct", "grand total", "sum"}
+    SKIP = {"total", "direct", "total direct", "grand total", "sum",
+            "italy", "china", "thailand", "total italy", "total china", "total thailand",
+            "atlanta", "mexico", "meta llc"}
     cust_cols = {j: str(c).strip() for j, c in enumerate(hdr)
                  if j >= 3 and isinstance(c, str) and c.strip() and str(c).strip().lower() not in SKIP}
     known = {c["name"].strip().upper(): c for c in DB.select("customer")}
