@@ -11,8 +11,8 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Query, Body,
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
 
-__version__ = "1.5.2"
-BUILD = "2026-07-18-18"
+__version__ = "1.5.3"
+BUILD = "2026-07-18-19"
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
 SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_KEY") or os.environ.get("SUPABASE_KEY", "")
@@ -923,6 +923,85 @@ def del_override(oid: int):
     DB.update("override", {"id": oid}, {"active": False})
     return {"ok": True}
 
+@app.post("/overrides/shift")
+def shift_units(payload: dict = Body(...), authorization: Optional[str] = Header(None)):
+    """Move `units` from period_from -> period_to for a customer within a country (or a whole
+    country total). Creates/updates overrides on both weeks so the move is auditable and the
+    quarter total is preserved by construction. Additive: never deletes source data.
+    payload: version_id, dc_code (IT/CN/TH), scope ('customer'|'country'),
+             customer_id (if scope=customer), period_from, period_to, units, reason, author"""
+    require_role(authorization, ("admin", "planner"))
+    version_id = payload["version_id"]; dc = payload["dc_code"]
+    scope = payload.get("scope", "customer"); units = float(payload["units"])
+    pf = payload["period_from"]; pt = payload["period_to"]
+    reason = (payload.get("reason") or "").strip()
+    author = payload.get("author", "")
+    if not reason: raise HTTPException(400, "reason required")
+    if units <= 0: raise HTTPException(400, "units must be positive")
+    if pf == pt: raise HTTPException(400, "from and to weeks must differ")
+    if dc not in ("IT", "CN", "TH"): raise HTTPException(400, "shift only applies to export DCs (IT/CN/TH)")
+
+    m = compute_model(version_id)
+    act = set(m["actualized_periods"])
+    if pf in act or pt in act:
+        raise HTTPException(400, "cannot shift into or out of an actualized week")
+
+    def cur_val(cid, pid):
+        for r in m["customer_grid"]["countries"][dc]["rows"]:
+            if r["period_id"] == pid:
+                c = r["cells"].get(cid); return c["v"] if c else 0.0
+        return 0.0
+
+    targets = []
+    if scope == "country":
+        # move proportionally across every customer that has volume in the FROM week
+        rowf = next((r for r in m["customer_grid"]["countries"][dc]["rows"] if r["period_id"] == pf), None)
+        base = sum(max(c["v"], 0) for c in (rowf["cells"].values() if rowf else []))
+        if base <= 0: raise HTTPException(400, "no positive volume in the from-week to move")
+        for cid, c in (rowf["cells"].items() if rowf else []):
+            if c["v"] > 0:
+                targets.append((cid, units * (c["v"] / base)))
+    else:
+        cid = int(payload["customer_id"])
+        avail = cur_val(cid, pf)
+        if units > avail + 1e-6:
+            raise HTTPException(400, f"cannot move {round(units)} — only {round(avail)} available in the from-week")
+        targets = [(cid, units)]
+
+    made = []
+    for cid, mv in targets:
+        from_new = cur_val(cid, pf) - mv
+        to_new = cur_val(cid, pt) + mv
+        for pid, val in ((pf, from_new), (pt, to_new)):
+            existing = next((o for o in DB.select("override", {"version_id": version_id})
+                             if o.get("active", True) and o["dc_code"] == dc
+                             and o["target_kind"] == "CUSTOMER" and str(o["target_key"]) == str(cid)
+                             and o["period_id"] == pid), None)
+            body = {"version_id": version_id, "dc_code": dc, "target_kind": "CUSTOMER",
+                    "target_key": str(cid), "period_id": pid, "units": round(val, 3),
+                    "reason": f"Shift {round(mv)} {'in' if pid==pt else 'out'}: {reason}",
+                    "author": author, "active": True,
+                    "created_at": datetime.datetime.utcnow().isoformat()}
+            if existing:
+                DB.update("override", {"id": existing["id"]}, {"units": round(val, 3), "reason": body["reason"], "author": author})
+            else:
+                DB.insert("override", body)
+        made.append({"customer_id": cid, "moved": round(mv)})
+    return {"ok": True, "moved_total": round(units), "targets": made}
+
+@app.get("/plan_baseline")
+def plan_baseline(version_id: int):
+    """Per-customer and per-country quarter totals from the ORIGINAL model (no overrides),
+    so the UI can warn when hand edits drift the plan up or down."""
+    m = compute_model(version_id, ignore_overrides=True)
+    cust_tot = defaultdict(float); country_tot = defaultdict(float)
+    for dc in ("IT", "CN", "TH"):
+        for r in m["customer_grid"]["countries"][dc]["rows"]:
+            for cid, c in r["cells"].items():
+                cust_tot[f"{dc}:{cid}"] += c["v"]; country_tot[dc] += c["v"]
+    return {"customer_totals": dict(cust_tot), "country_totals": dict(country_tot),
+            "grand_total": round(sum(country_tot.values()))}
+
 @app.post("/overrides/reallocate_negatives")
 def reallocate_negatives(payload: dict = Body(...)):
     """One-click: for every negative export-DC customer-week (IT/CN/TH), create an override that
@@ -951,7 +1030,7 @@ def reallocate_negatives(payload: dict = Body(...)):
 # ------------------------------------------------------------------
 # model compute — the engine
 # ------------------------------------------------------------------
-def compute_model(version_id: int):
+def compute_model(version_id: int, ignore_overrides: bool = False):
     vrows = DB.select("version", {"id": version_id})
     if not vrows: raise HTTPException(404, "version not found")
     v = vrows[0]
@@ -983,7 +1062,7 @@ def compute_model(version_id: int):
            for r in DB.select("penetration", {"version_id": version_id})}
     rates = {(r["dc_code"], r["kind"]): r["pct"] for r in DB.select("rate", {"version_id": version_id})}
     dplan = {(r["period_id"], r["dc_code"]): r["units"] for r in DB.select("dummy_plan", {"version_id": version_id})}
-    ovr = [o for o in DB.select("override", {"version_id": version_id}) if o.get("active", True)]
+    ovr = [] if ignore_overrides else [o for o in DB.select("override", {"version_id": version_id}) if o.get("active", True)]
     ovr_ch = {(o["dc_code"], o["target_key"], o["period_id"]): o for o in ovr if o["target_kind"] == "CHANNEL"}
     ovr_cu = {(o["dc_code"], o["target_key"], o["period_id"]): o for o in ovr if o["target_kind"] == "CUSTOMER"}
 
