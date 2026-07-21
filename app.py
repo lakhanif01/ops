@@ -11,8 +11,8 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Query, Body,
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
 
-__version__ = "1.5.3"
-BUILD = "2026-07-18-19"
+__version__ = "1.5.4"
+BUILD = "2026-07-21-20"
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
 SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_KEY") or os.environ.get("SUPABASE_KEY", "")
@@ -492,7 +492,7 @@ async def import_na(file: UploadFile = File(...), version_id: int = Form(...), c
     return _commit_or_preview(commit, "NA", file.filename, preview, do_commit)
 
 
-def parse_all_channels(data, filename, aliases, cot_map, month_filter=None, want_entity=False):
+def parse_all_channels(data, filename, aliases, cot_map, month_filter=None, want_entity=False, want_dims=False):
     """Shared parser for BO 'All Channels Data' exports.
     Returns (agg, cust_agg, unmapped_cot, unmapped_plants, nrows) where
     agg[(year,mo,wk,dc,ch,kind)] = units and cust_agg[(year,mo,wk,dc,entity_upper)] = units."""
@@ -526,6 +526,8 @@ def parse_all_channels(data, filename, aliases, cot_map, month_filter=None, want
     missing = [k for k, v2 in need.items() if v2 is None]
     if missing: raise HTTPException(400, f"File missing columns: {missing}")
     agg, cust_agg = defaultdict(float), defaultdict(float)
+    dim_country = defaultdict(float)   # (dimkind, dimval, dc) -> units  [export dc only]
+    cust_dim = defaultdict(float)      # (cust_upper, dimkind, dimval) -> units  [ALL dcs, for mix weighting]
     unmapped_cot, unmapped_plant = set(), set()
     nrows = 0
     for r in it:
@@ -557,6 +559,19 @@ def parse_all_channels(data, filename, aliases, cot_map, month_filter=None, want
             agg[(yr, mo, wk, dc, ch, "RETURN")] += abs(units)
         if want_entity and iEnt is not None and r[iEnt]:
             cust_agg[(yr, mo, wk, dc, str(r[iEnt]).strip().upper())] += units
+        if want_dims:
+            ent_u = str(r[iEnt]).strip().upper() if (iEnt is not None and r[iEnt]) else ""
+            if dc in ("IT", "CN", "TH"):
+                if brand: dim_country[("BRAND", brand, dc)] += units
+                if mix:   dim_country[("MIX", mix, dc)] += units
+                if cot:   dim_country[("CHANNEL", cot, dc)] += units
+            if ent_u:
+                # customer's dimensional mix comes from ALL their shipments (domestic dominates)
+                if brand: cust_dim[(ent_u, "BRAND", brand)] += units
+                if mix:   cust_dim[(ent_u, "MIX", mix)] += units
+                if cot:   cust_dim[(ent_u, "CHANNEL", cot)] += units
+    if want_dims:
+        return agg, cust_agg, unmapped_cot, unmapped_plant, nrows, dim_country, cust_dim
     return agg, cust_agg, unmapped_cot, unmapped_plant, nrows
 
 @app.post("/import/actuals")
@@ -572,8 +587,8 @@ async def import_actuals(file: UploadFile = File(...), version_id: int = Form(..
     q_months = {(cyc["quarter"] - 1) * 3 + i for i in (1, 2, 3)}
     aliases = DB.select("plant_alias")
     cot_map = {r["cot"]: r["channel_code"] for r in DB.select("cot_alias")}
-    agg, _, unmapped_cot, unmapped_plant, nrows = parse_all_channels(data, file.filename, aliases, cot_map,
-                                                                     month_filter=q_months)
+    agg, cust_agg, unmapped_cot, unmapped_plant, nrows, dim_country, cust_dim = parse_all_channels(
+        data, file.filename, aliases, cot_map, month_filter=q_months, want_entity=True, want_dims=True)
     by_dc = defaultdict(float)
     for (yr, mo, wk, dc, ch, k), u in agg.items():
         if k == "GROSS": by_dc[dc] += u
@@ -589,7 +604,25 @@ async def import_actuals(file: UploadFile = File(...), version_id: int = Form(..
             rows.append({"cycle_id": cyc["id"], "period_id": per["id"], "dc_code": dc,
                          "channel_code": ch, "kind": k, "units": u})
         DB.upsert("actual", rows, ["cycle_id", "period_id", "dc_code", "channel_code", "kind"])
-        return {"rows": len(rows), "meta": preview}
+        # --- customer x DC actuals (for customer->country penetration) ---
+        DB.delete("actual_customer", {"cycle_id": cyc["id"]})   # clean replace
+        crows = [{"cycle_id": cyc["id"], "year": yr, "month_no": mo, "week_no": wk,
+                  "dc_code": dc, "customer_name": ent, "units": u}
+                 for (yr, mo, wk, dc, ent), u in cust_agg.items()]
+        if crows:
+            DB.upsert("actual_customer", crows,
+                      ["cycle_id", "year", "month_no", "week_no", "dc_code", "customer_name"])
+        # dimension -> country (export) and customer -> dimension mix (for penetration fallback)
+        DB.delete("actual_dim_country", {"cycle_id": cyc["id"]})
+        DB.delete("actual_cust_dim", {"cycle_id": cyc["id"]})
+        dc_rows = [{"cycle_id": cyc["id"], "dim_kind": k, "dim_val": val, "dc_code": d, "units": u}
+                   for (k, val, d), u in dim_country.items()]
+        cd_rows = [{"cycle_id": cyc["id"], "customer_name": ent, "dim_kind": k, "dim_val": val, "units": u}
+                   for (ent, k, val), u in cust_dim.items()]
+        if dc_rows: DB.upsert("actual_dim_country", dc_rows, ["cycle_id", "dim_kind", "dim_val", "dc_code"])
+        if cd_rows: DB.upsert("actual_cust_dim", cd_rows, ["cycle_id", "customer_name", "dim_kind", "dim_val"])
+        return {"rows": len(rows), "cust_rows": len(crows),
+                "dim_rows": len(dc_rows), "custdim_rows": len(cd_rows), "meta": preview}
     return _commit_or_preview(commit, "ACTUALS", file.filename, preview, do_commit)
 
 @app.post("/import/history")
@@ -768,9 +801,22 @@ async def import_customers(file: UploadFile = File(...), version_id: int = Form(
     if hdr is None: raise HTTPException(400, "Could not locate customer header row")
     SKIP = {"total", "direct", "total direct", "grand total", "sum",
             "italy", "china", "thailand", "total italy", "total china", "total thailand",
-            "atlanta", "mexico", "meta llc"}
+            "atlanta", "mexico", "meta llc",
+            # Eleanor's subtotal / check columns (not customers)
+            "ttl vas", "ttl no vas", "ttl ds", "ttl ds op", "vs lw", "month", "week",
+            "meta/meu", "rw other", "ow other", "nuance", "rw", "ow", "+/- rw", "+/- ow",
+            "addtl rw", "addtl ow", "ttl rw meta llc", "ttl ow meta llc",
+            "atl/mx rw meta llc", "atl /mxow meta llc"}
+    def _is_summary(name):
+        n = str(name).strip().lower()
+        if n in SKIP: return True
+        # prefix/keyword guards for Eleanor's TTL/VS/META family
+        if n.startswith("ttl ") or n.startswith("vs ") or n.startswith("+/-"): return True
+        if n.startswith("meta/") or n.startswith("meta ") or "meta llc" in n: return True
+        if n in ("rw other", "ow other", "rw", "ow", "nuance"): return True
+        return False
     cust_cols = {j: str(c).strip() for j, c in enumerate(hdr)
-                 if j >= 3 and isinstance(c, str) and c.strip() and str(c).strip().lower() not in SKIP}
+                 if j >= 3 and isinstance(c, str) and c.strip() and not _is_summary(c)}
     known = {c["name"].strip().upper(): c for c in DB.select("customer")}
     alias_lookup = {}
     for c in DB.select("customer"):
@@ -840,6 +886,65 @@ def _recency_weighted(hist_rows, key_fn, val_fn, latest_ym):
         out[key_fn(h)] += val_fn(h) * w
     return out
 
+def _norm_cust_name(s):
+    """Normalize customer names so BO actuals (DILLARDS, WALMART STORES INC) match Eleanor's
+    customer table (DILLARD'S, WALMART STORES INC). Removes apostrophes + corporate suffixes."""
+    import re as _re
+    s = str(s or "").upper().strip()
+    s = s.replace("\u2019", "").replace("'", "")          # remove apostrophes (no space)
+    s = _re.sub(r"[,\.\-\(\)#/]", " ", s)                 # other punctuation -> space
+    s = _re.sub(r"\b(INC|CORP|CORPORATION|LLC|LTD|CO|COMPANY|USA|US)\b", "", s)
+    s = _re.sub(r"\s+", " ", s).strip()
+    return s
+
+@app.get("/customer_aliases")
+def list_customer_aliases():
+    aliases = DB.select("customer_alias")
+    custs = {c["id"]: c["name"] for c in DB.select("customer")}
+    return [{"id": a["id"], "actuals_name": a["actuals_name"],
+             "customer_id": a["customer_id"], "customer_name": custs.get(a["customer_id"], "?")}
+            for a in aliases]
+
+@app.post("/customer_aliases")
+def add_customer_alias(payload: dict = Body(...), authorization: Optional[str] = Header(None)):
+    require_role(authorization, ("admin", "planner"))
+    an = (payload.get("actuals_name") or "").strip()
+    cid = payload.get("customer_id")
+    if not an or cid is None: raise HTTPException(400, "actuals_name and customer_id required")
+    existing = [a for a in DB.select("customer_alias") if a["actuals_name"].strip().upper() == an.upper()]
+    if existing:
+        DB.update("customer_alias", {"id": existing[0]["id"]}, {"customer_id": cid})
+        return {"ok": True, "updated": True}
+    return DB.insert("customer_alias", {"actuals_name": an, "customer_id": cid})
+
+@app.delete("/customer_aliases/{aid}")
+def del_customer_alias(aid: int, authorization: Optional[str] = Header(None)):
+    require_role(authorization, ("admin", "planner"))
+    DB.delete("customer_alias", {"id": aid})
+    return {"ok": True}
+
+@app.get("/penetration/unmatched_actuals")
+def unmatched_actuals(version_id: int):
+    """BO actuals customer names (with export volume) that don't map to any customer or alias —
+    so the user knows which aliases to add."""
+    customers_all = DB.select("customer")
+    by_norm = {}
+    for c in customers_all:
+        by_norm[_norm_cust_name(c["name"])] = c["id"]
+        for a in (c.get("aliases") or []): by_norm[_norm_cust_name(a)] = c["id"]
+    for al in DB.select("customer_alias"): by_norm[_norm_cust_name(al["actuals_name"])] = al["customer_id"]
+    from collections import defaultdict as _dd
+    exp = _dd(float)
+    for a in DB.select("actual_customer"):
+        if a["dc_code"] in ("IT", "CN", "TH"): exp[a["customer_name"]] += a["units"]
+    out = []
+    for nm, u in exp.items():
+        n = _norm_cust_name(nm)
+        if n in by_norm or n.startswith("COSTCO"): continue
+        out.append({"actuals_name": nm, "export_units": round(u)})
+    out.sort(key=lambda x: -x["export_units"])
+    return {"unmatched": out[:50], "customers": [{"id": c["id"], "name": c["name"]} for c in customers_all]}
+
 @app.get("/penetration/suggest")
 def suggest_pen(version_id: int, months: int = 0):
     """Recency-weighted penetration from ALL imported history (0.85^months_ago).
@@ -867,22 +972,137 @@ def suggest_pen(version_id: int, months: int = 0):
             tot[a["channel_code"]] += a["units"]; per_dc[(a["dc_code"], a["channel_code"])] += a["units"]
     out = [{"dc_code": dc, "target_kind": "CHANNEL", "target_key": ch, "pct": round(u / tot[ch], 4)}
            for (dc, ch), u in per_dc.items() if tot[ch] > 0]
-    ch_hist = DB.select("history_customer")
-    cust_out = []
-    if ch_hist:
-        latest = max((h["year"], h["month_no"]) for h in ch_hist)
+    # --- customer -> country penetration, derived from actuals (with fallback ladder) ---
+    # Fallback per customer, in order:
+    #   1. customer's OWN export actuals (plant codes IT/CN/TH)
+    #   2. brand-code mix: blend the customer's brand mix (from their actuals) x each brand's export country split
+    #   3. collection-mix: same idea with OPTICAL/SUN/ELECTRONICS
+    #   4. channel: same idea with the customer's channel
+    #   5. overall Direct export split (last resort)
+    # COSTCO variants share COSTCO WHOLESALE's split; user-managed customer_alias maps BO names -> customer ids.
+    export_dcs = ("IT", "CN", "TH")
+    customers_all = DB.select("customer")
+    cust_by_name = {}
+    for c in customers_all:
+        cust_by_name[_norm_cust_name(c["name"])] = c["id"]
+        for a in (c.get("aliases") or []): cust_by_name[_norm_cust_name(a)] = c["id"]
+    # user alias table: actuals_name (normalized) -> customer_id
+    for al in DB.select("customer_alias"):
+        cust_by_name[_norm_cust_name(al["actuals_name"])] = al["customer_id"]
+    # built-in COSTCO grouping: any Eleanor COSTCO variant <- actuals "COSTCO WHOLESALE"
+    id_by_norm = {_norm_cust_name(c["name"]): c["id"] for c in customers_all}
+    costco_ids = [cid for nm, cid in id_by_norm.items() if nm.startswith("COSTCO")]
+
+    # helper to resolve a BO actuals customer name -> our customer id
+    def _resolve(nm):
+        n = _norm_cust_name(nm)
+        if n in cust_by_name: return cust_by_name[n]
+        if n.startswith("COSTCO"):   # COSTCO WHOLESALE(S) -> all COSTCO variants handled below
+            return "COSTCO_GROUP"
+        return None
+
+    # 1) customer OWN export actuals (per-customer id) + COSTCO group bucket
+    cust_rows = []
+    costco_country = defaultdict(float)   # dc -> units (shared COSTCO split)
+    costco_exp = 0.0
+    for a in DB.select("actual_customer"):
+        if a["dc_code"] not in export_dcs: continue
+        cid = _resolve(a["customer_name"])
+        if cid == "COSTCO_GROUP":
+            costco_country[a["dc_code"]] += a["units"]; costco_exp += a["units"]
+        elif cid is not None:
+            cust_rows.append({"year": a["year"], "month_no": a["month_no"],
+                              "dc_code": a["dc_code"], "customer_id": cid, "units": a["units"]})
+    for h in DB.select("history_customer"):
+        if h["dc_code"] in export_dcs:
+            cust_rows.append({"year": h["year"], "month_no": h["month_no"],
+                              "dc_code": h["dc_code"], "customer_id": h["customer_id"], "units": h["units"]})
+
+    have_own = {}   # cid -> {dc: pct}
+    if cust_rows:
+        clatest = max((r["year"], r["month_no"]) for r in cust_rows)
         if months > 0:
-            lo = latest[0] * 12 + latest[1] - (months - 1)
-            ch_hist = [h for h in ch_hist if h["year"] * 12 + h["month_no"] >= lo]
-        ctot = _recency_weighted(ch_hist, lambda h: h["customer_id"], lambda h: h["units"], latest)
-        cdc = _recency_weighted(ch_hist, lambda h: (h["dc_code"], h["customer_id"]), lambda h: h["units"], latest)
-        for (dc, cid), u in cdc.items():
-            if dc in ("IT", "CN", "TH") and ctot[cid] > 0:
-                cust_out.append({"dc_code": dc, "target_kind": "CUSTOMER", "target_key": str(cid),
-                                 "pct": round(u / ctot[cid], 4)})
+            lo = clatest[0] * 12 + clatest[1] - (months - 1)
+            cust_rows = [r for r in cust_rows if r["year"] * 12 + r["month_no"] >= lo]
+        cexp = _recency_weighted(cust_rows, lambda r: r["customer_id"], lambda r: r["units"], clatest)
+        ccountry = _recency_weighted(cust_rows, lambda r: (r["dc_code"], r["customer_id"]), lambda r: r["units"], clatest)
+        for (dc, cid), u in ccountry.items():
+            if cexp.get(cid, 0) > 0:
+                have_own.setdefault(cid, {})[dc] = u / cexp[cid]
+
+    # COSTCO shared split -> apply to all COSTCO variant ids
+    if costco_exp > 0:
+        for cid in costco_ids:
+            have_own[cid] = {dc: costco_country.get(dc, 0.0) / costco_exp for dc in export_dcs}
+
+    # 2-4) dimension -> country splits, and each customer's dimensional mix (from actuals)
+    dimc = defaultdict(lambda: defaultdict(float))   # (kind,val) -> {dc: units}
+    for d in DB.select("actual_dim_country"):
+        dimc[(d["dim_kind"], d["dim_val"])][d["dc_code"]] += d["units"]
+    dim_split = {}   # (kind,val) -> {dc: pct}
+    for key, dd in dimc.items():
+        tot = sum(dd.values())
+        if tot > 0: dim_split[key] = {dc: dd.get(dc, 0.0) / tot for dc in export_dcs}
+    # customer's dimensional mix (weights) from their own actuals (all DCs)
+    cust_dim_mix = defaultdict(lambda: defaultdict(float))   # cid -> {(kind,val): units}
+    for cd in DB.select("actual_cust_dim"):
+        cid = _resolve(cd["customer_name"])
+        if cid in (None, "COSTCO_GROUP"):
+            if cid == "COSTCO_GROUP":
+                for ccid in costco_ids:
+                    cust_dim_mix[ccid][(cd["dim_kind"], cd["dim_val"])] += cd["units"]
+            continue
+        cust_dim_mix[cid][(cd["dim_kind"], cd["dim_val"])] += cd["units"]
+
+    def _blend(cid, kind):
+        """Blend a customer's mix of `kind` dims x each dim's export country split."""
+        mix = {k: u for (k, v), u in [((k2, v2), u2) for (k2, v2), u2 in cust_dim_mix.get(cid, {}).items()] if k[0] == kind} if False else None
+        # gather this customer's weights for the given dim kind
+        weights = {(k, v): u for (k, v), u in cust_dim_mix.get(cid, {}).items() if k == kind}
+        tot = sum(weights.values())
+        if tot <= 0: return None
+        acc = {dc: 0.0 for dc in export_dcs}
+        used = 0.0
+        for (k, v), u in weights.items():
+            sp = dim_split.get((k, v))
+            if not sp: continue
+            for dc in export_dcs: acc[dc] += (u / tot) * sp[dc]
+            used += u / tot
+        if used <= 0: return None
+        return {dc: acc[dc] / used for dc in export_dcs}   # renormalize over dims that had a split
+
+    # 5) overall Direct export split (last resort)
+    overall = defaultdict(float)
+    for key, dd in dimc.items():
+        if key[0] == "BRAND":
+            for dc in export_dcs: overall[dc] += dd.get(dc, 0.0)
+    ov_tot = sum(overall.values())
+    overall_split = {dc: (overall[dc] / ov_tot if ov_tot > 0 else 1/3) for dc in export_dcs}
+
+    cust_out = []
+    tier_counts = defaultdict(int)
+    for c in customers_all:
+        cid = c["id"]
+        split = have_own.get(cid); tier = "own"
+        if not split: split = _blend(cid, "BRAND");   tier = "brand" if split else tier
+        if not split: split = _blend(cid, "MIX");     tier = "mix" if split else tier
+        if not split: split = _blend(cid, "CHANNEL"); tier = "channel" if split else tier
+        if not split: split, tier = overall_split, "overall"
+        split = {dc: float(split.get(dc, 0.0)) for dc in export_dcs}   # guarantee all keys
+        s = sum(split.values())
+        if s <= 0: continue
+        tier_counts[tier] += 1
+        for dc in export_dcs:
+            cust_out.append({"dc_code": dc, "target_kind": "CUSTOMER", "target_key": str(cid),
+                             "pct": round(split[dc] / s, 4)})
+
+    cust_basis = ("customer->country from actuals: " +
+                  ", ".join(f"{k}={v}" for k, v in sorted(tier_counts.items())) ) if tier_counts else "no customer actuals found"
+
     n_months = len({(h["year"], h["month_no"]) for h in hist}) if hist else 0
     return {"suggestions": out, "customer_suggestions": cust_out, "basis": basis,
-            "history_loaded": bool(hist or ch_hist), "months_of_history": n_months}
+            "customer_basis": cust_basis, "customer_tiers": dict(tier_counts),
+            "history_loaded": bool(hist or cust_rows), "months_of_history": n_months}
 
 @app.get("/rates")
 def get_rates(version_id: int):
