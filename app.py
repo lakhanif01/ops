@@ -12,7 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
 
 __version__ = "1.5.2"
-BUILD = "2026-07-18-17"
+BUILD = "2026-07-18-18"
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
 SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_KEY") or os.environ.get("SUPABASE_KEY", "")
@@ -580,7 +580,7 @@ async def import_actuals(file: UploadFile = File(...), version_id: int = Form(..
     preview = {"rows_read": nrows, "cells": len(agg),
                "gross_by_dc": {k: round(v2) for k, v2 in sorted(by_dc.items())},
                "unmapped_cot": sorted(unmapped_cot), "unmapped_plants": sorted(unmapped_plant),
-               "already_imported": _already_imported("ACTUALS", cycle_id=cyc["id"])}
+               "already_imported": False}
     def do_commit():
         _clear_import("ACTUALS", cycle_id=cyc["id"])   # clean replace (GROSS+RETURN only)
         rows = []
@@ -681,7 +681,7 @@ async def import_accessories(file: UploadFile = File(...), version_id: int = For
         if mo not in q_months: continue
         dc = plant_to_dc(r[iPl], aliases)
         if dc: agg[(mo, wk, dc)] += num(r[iInv])
-    preview = {"cells": len(agg), "by_dc": {}, "already_imported": _already_imported("ACC", cycle_id=cyc["id"])}
+    preview = {"cells": len(agg), "by_dc": {}, "already_imported": False}
     for (mo, wk, dc), u in agg.items():
         preview["by_dc"][dc] = round(preview["by_dc"].get(dc, 0) + u)
     def do_commit():
@@ -733,7 +733,7 @@ async def import_dummies(file: UploadFile = File(...), version_id: int = Form(..
         dc = plant_to_dc(r[iPl], aliases)
         if dc: agg[(mo, wk, dc)] += num(r[iU]) if iU is not None else 1
     preview = {"sheet": name, "cells": len(agg),
-               "by_dc": {}, "already_imported": _already_imported("DUMMY", cycle_id=cyc["id"])}
+               "by_dc": {}, "already_imported": False}
     for (mo, wk, dc), u in agg.items():
         preview["by_dc"][dc] = round(preview["by_dc"].get(dc, 0) + u)
     def do_commit():
