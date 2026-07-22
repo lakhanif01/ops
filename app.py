@@ -11,8 +11,8 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Query, Body,
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
 
-__version__ = "1.5.4"
-BUILD = "2026-07-21-20"
+__version__ = "1.5.6"
+BUILD = "2026-07-21-22"
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
 SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_KEY") or os.environ.get("SUPABASE_KEY", "")
@@ -386,6 +386,43 @@ def publish_version(vid: int, authorization: Optional[str] = Header(None)):
     DB.update("version", {"id": vid}, {"published": True, "published_at": datetime.datetime.utcnow().isoformat()})
     return {"ok": True}
 
+@app.delete("/version/{vid}")
+def delete_version(vid: int, authorization: Optional[str] = Header(None)):
+    """Delete a single WEEK (version) and EVERYTHING imported for it — each week is a full,
+    independent snapshot: forecast, customers, penetration, rates, dummy plan, overrides, AND
+    this week's own actuals/accessories/dummies. Other weeks are untouched. Protected accounts
+    are never involved here."""
+    require_role(authorization, ("admin", "planner"))
+    v = DB.select("version", {"id": vid})
+    if not v: raise HTTPException(404, "version not found")
+    for table in ("forecast_channel", "forecast_customer", "penetration", "rate",
+                  "dummy_plan", "override",
+                  "actual", "actual_customer", "actual_dim_country", "actual_cust_dim"):
+        DB.delete(table, {"version_id": vid})
+    DB.delete("version", {"id": vid})
+    return {"ok": True, "deleted": "version", "week_tag": v[0].get("week_tag")}
+
+@app.delete("/cycle/{cid}")
+def delete_cycle(cid: int, authorization: Optional[str] = Header(None)):
+    """Delete an ENTIRE CYCLE (quarter): every week/version in it AND the cycle-level uploads
+    (actuals, accessories, dummies, customer x DC penetration data, periods). This wipes
+    everything uploaded for that quarter. Admin only."""
+    require_role(authorization, ("admin",))
+    cyc = DB.select("cycle", {"id": cid})
+    if not cyc: raise HTTPException(404, "cycle not found")
+    # delete all versions in this cycle (and their per-week data incl. actuals)
+    for v in DB.select("version", {"cycle_id": cid}):
+        for table in ("forecast_channel", "forecast_customer", "penetration", "rate",
+                      "dummy_plan", "override",
+                      "actual", "actual_customer", "actual_dim_country", "actual_cust_dim"):
+            DB.delete(table, {"version_id": v["id"]})
+        DB.delete("version", {"id": v["id"]})
+    # sweep any legacy cycle-scoped actuals (pre-1.5.6 rows without version_id) + periods
+    for table in ("actual", "actual_customer", "actual_dim_country", "actual_cust_dim", "period"):
+        DB.delete(table, {"cycle_id": cid})
+    DB.delete("cycle", {"id": cid})
+    return {"ok": True, "deleted": "cycle", "label": cyc[0].get("label")}
+
 @app.get("/version/{vid}/periods")
 def version_periods(vid: int):
     v = DB.select("version", {"id": vid})
@@ -402,15 +439,15 @@ def _clear_import(kind, version_id=None, cycle_id=None):
         DB.delete("forecast_channel", {"version_id": version_id})
     elif kind == "CUSTFC" and version_id is not None:
         DB.delete("forecast_customer", {"version_id": version_id})
-    elif kind in ("ACTUALS", "ACC", "DUMMY") and cycle_id is not None:
-        # actual table shares one table across kinds — delete only the matching kind(s)
+    elif kind in ("ACTUALS", "ACC", "DUMMY") and version_id is not None:
+        # actual table shares one table across kinds — delete only the matching kind(s), THIS week only
         if kind == "ACTUALS":
             for k in ("GROSS", "RETURN"):
-                DB.delete("actual", {"cycle_id": cycle_id, "kind": k})
+                DB.delete("actual", {"version_id": version_id, "kind": k})
         elif kind == "ACC":
-            DB.delete("actual", {"cycle_id": cycle_id, "kind": "ACC"})
+            DB.delete("actual", {"version_id": version_id, "kind": "ACC"})
         elif kind == "DUMMY":
-            DB.delete("actual", {"cycle_id": cycle_id, "kind": "DUMMY"})
+            DB.delete("actual", {"version_id": version_id, "kind": "DUMMY"})
 
 def _already_imported(kind, version_id=None, cycle_id=None):
     """Has this import type already been committed for this cycle/version?"""
@@ -419,12 +456,12 @@ def _already_imported(kind, version_id=None, cycle_id=None):
             return len(DB.select("forecast_channel", {"version_id": version_id})) > 0
         if kind == "CUSTFC" and version_id is not None:
             return len(DB.select("forecast_customer", {"version_id": version_id})) > 0
-        if kind == "ACTUALS" and cycle_id is not None:
-            return any(a["kind"] in ("GROSS", "RETURN") for a in DB.select("actual", {"cycle_id": cycle_id}))
-        if kind == "ACC" and cycle_id is not None:
-            return any(a["kind"] == "ACC" for a in DB.select("actual", {"cycle_id": cycle_id}))
-        if kind == "DUMMY" and cycle_id is not None:
-            return any(a["kind"] == "DUMMY" for a in DB.select("actual", {"cycle_id": cycle_id}))
+        if kind == "ACTUALS" and version_id is not None:
+            return any(a["kind"] in ("GROSS", "RETURN") for a in DB.select("actual", {"version_id": version_id}))
+        if kind == "ACC" and version_id is not None:
+            return any(a["kind"] == "ACC" for a in DB.select("actual", {"version_id": version_id}))
+        if kind == "DUMMY" and version_id is not None:
+            return any(a["kind"] == "DUMMY" for a in DB.select("actual", {"version_id": version_id}))
     except Exception:
         pass
     return False
@@ -597,30 +634,30 @@ async def import_actuals(file: UploadFile = File(...), version_id: int = Form(..
                "unmapped_cot": sorted(unmapped_cot), "unmapped_plants": sorted(unmapped_plant),
                "already_imported": False}
     def do_commit():
-        _clear_import("ACTUALS", cycle_id=cyc["id"])   # clean replace (GROSS+RETURN only)
+        _clear_import("ACTUALS", version_id=version_id)   # clean replace THIS week (GROSS+RETURN)
         rows = []
         for (yr, mo, wk, dc, ch, k), u in agg.items():
             per = ensure_period(cyc["id"], mo, wk)
-            rows.append({"cycle_id": cyc["id"], "period_id": per["id"], "dc_code": dc,
+            rows.append({"version_id": version_id, "cycle_id": cyc["id"], "period_id": per["id"], "dc_code": dc,
                          "channel_code": ch, "kind": k, "units": u})
-        DB.upsert("actual", rows, ["cycle_id", "period_id", "dc_code", "channel_code", "kind"])
-        # --- customer x DC actuals (for customer->country penetration) ---
-        DB.delete("actual_customer", {"cycle_id": cyc["id"]})   # clean replace
-        crows = [{"cycle_id": cyc["id"], "year": yr, "month_no": mo, "week_no": wk,
+        DB.upsert("actual", rows, ["version_id", "period_id", "dc_code", "channel_code", "kind"])
+        # --- customer x DC actuals (for customer->country penetration) — per week ---
+        DB.delete("actual_customer", {"version_id": version_id})   # clean replace THIS week
+        crows = [{"version_id": version_id, "cycle_id": cyc["id"], "year": yr, "month_no": mo, "week_no": wk,
                   "dc_code": dc, "customer_name": ent, "units": u}
                  for (yr, mo, wk, dc, ent), u in cust_agg.items()]
         if crows:
             DB.upsert("actual_customer", crows,
-                      ["cycle_id", "year", "month_no", "week_no", "dc_code", "customer_name"])
-        # dimension -> country (export) and customer -> dimension mix (for penetration fallback)
-        DB.delete("actual_dim_country", {"cycle_id": cyc["id"]})
-        DB.delete("actual_cust_dim", {"cycle_id": cyc["id"]})
-        dc_rows = [{"cycle_id": cyc["id"], "dim_kind": k, "dim_val": val, "dc_code": d, "units": u}
+                      ["version_id", "year", "month_no", "week_no", "dc_code", "customer_name"])
+        # dimension -> country (export) and customer -> dimension mix (for penetration fallback) — per week
+        DB.delete("actual_dim_country", {"version_id": version_id})
+        DB.delete("actual_cust_dim", {"version_id": version_id})
+        dc_rows = [{"version_id": version_id, "cycle_id": cyc["id"], "dim_kind": k, "dim_val": val, "dc_code": d, "units": u}
                    for (k, val, d), u in dim_country.items()]
-        cd_rows = [{"cycle_id": cyc["id"], "customer_name": ent, "dim_kind": k, "dim_val": val, "units": u}
+        cd_rows = [{"version_id": version_id, "cycle_id": cyc["id"], "customer_name": ent, "dim_kind": k, "dim_val": val, "units": u}
                    for (ent, k, val), u in cust_dim.items()]
-        if dc_rows: DB.upsert("actual_dim_country", dc_rows, ["cycle_id", "dim_kind", "dim_val", "dc_code"])
-        if cd_rows: DB.upsert("actual_cust_dim", cd_rows, ["cycle_id", "customer_name", "dim_kind", "dim_val"])
+        if dc_rows: DB.upsert("actual_dim_country", dc_rows, ["version_id", "dim_kind", "dim_val", "dc_code"])
+        if cd_rows: DB.upsert("actual_cust_dim", cd_rows, ["version_id", "customer_name", "dim_kind", "dim_val"])
         return {"rows": len(rows), "cust_rows": len(crows),
                 "dim_rows": len(dc_rows), "custdim_rows": len(cd_rows), "meta": preview}
     return _commit_or_preview(commit, "ACTUALS", file.filename, preview, do_commit)
@@ -718,11 +755,11 @@ async def import_accessories(file: UploadFile = File(...), version_id: int = For
     for (mo, wk, dc), u in agg.items():
         preview["by_dc"][dc] = round(preview["by_dc"].get(dc, 0) + u)
     def do_commit():
-        _clear_import("ACC", cycle_id=cyc["id"])
-        rows = [{"cycle_id": cyc["id"], "period_id": ensure_period(cyc["id"], mo, wk)["id"],
+        _clear_import("ACC", version_id=version_id)
+        rows = [{"version_id": version_id, "cycle_id": cyc["id"], "period_id": ensure_period(cyc["id"], mo, wk)["id"],
                  "dc_code": dc, "channel_code": "", "kind": "ACC", "units": u}
                 for (mo, wk, dc), u in agg.items()]
-        DB.upsert("actual", rows, ["cycle_id", "period_id", "dc_code", "channel_code", "kind"])
+        DB.upsert("actual", rows, ["version_id", "period_id", "dc_code", "channel_code", "kind"])
         return {"rows": len(rows), "meta": preview}
     return _commit_or_preview(commit, "ACC", file.filename, preview, do_commit)
 
@@ -770,11 +807,11 @@ async def import_dummies(file: UploadFile = File(...), version_id: int = Form(..
     for (mo, wk, dc), u in agg.items():
         preview["by_dc"][dc] = round(preview["by_dc"].get(dc, 0) + u)
     def do_commit():
-        _clear_import("DUMMY", cycle_id=cyc["id"])
-        rows = [{"cycle_id": cyc["id"], "period_id": ensure_period(cyc["id"], mo, wk)["id"],
+        _clear_import("DUMMY", version_id=version_id)
+        rows = [{"version_id": version_id, "cycle_id": cyc["id"], "period_id": ensure_period(cyc["id"], mo, wk)["id"],
                  "dc_code": dc, "channel_code": "", "kind": "DUMMY", "units": u}
                 for (mo, wk, dc), u in agg.items()]
-        DB.upsert("actual", rows, ["cycle_id", "period_id", "dc_code", "channel_code", "kind"])
+        DB.upsert("actual", rows, ["version_id", "period_id", "dc_code", "channel_code", "kind"])
         return {"rows": len(rows), "meta": preview}
     return _commit_or_preview(commit, "DUMMY", file.filename, preview, do_commit)
 
@@ -935,7 +972,7 @@ def unmatched_actuals(version_id: int):
     for al in DB.select("customer_alias"): by_norm[_norm_cust_name(al["actuals_name"])] = al["customer_id"]
     from collections import defaultdict as _dd
     exp = _dd(float)
-    for a in DB.select("actual_customer"):
+    for a in DB.select("actual_customer", {"version_id": version_id}):
         if a["dc_code"] in ("IT", "CN", "TH"): exp[a["customer_name"]] += a["units"]
     out = []
     for nm, u in exp.items():
@@ -965,7 +1002,7 @@ def suggest_pen(version_id: int, months: int = 0):
         per_dc = _recency_weighted(hist, lambda h: (h["dc_code"], h["channel_code"]), lambda h: h["units"], latest)
     else:
         basis = "current cycle QTD (no history imported yet)"
-        acts = DB.select("actual", {"cycle_id": v[0]["cycle_id"]})
+        acts = DB.select("actual", {"version_id": version_id})
         tot, per_dc = defaultdict(float), defaultdict(float)
         for a in acts:
             if a["kind"] != "GROSS" or not a["channel_code"]: continue
@@ -1005,7 +1042,7 @@ def suggest_pen(version_id: int, months: int = 0):
     cust_rows = []
     costco_country = defaultdict(float)   # dc -> units (shared COSTCO split)
     costco_exp = 0.0
-    for a in DB.select("actual_customer"):
+    for a in DB.select("actual_customer", {"version_id": version_id}):
         if a["dc_code"] not in export_dcs: continue
         cid = _resolve(a["customer_name"])
         if cid == "COSTCO_GROUP":
@@ -1037,7 +1074,7 @@ def suggest_pen(version_id: int, months: int = 0):
 
     # 2-4) dimension -> country splits, and each customer's dimensional mix (from actuals)
     dimc = defaultdict(lambda: defaultdict(float))   # (kind,val) -> {dc: units}
-    for d in DB.select("actual_dim_country"):
+    for d in DB.select("actual_dim_country", {"version_id": version_id}):
         dimc[(d["dim_kind"], d["dim_val"])][d["dc_code"]] += d["units"]
     dim_split = {}   # (kind,val) -> {dc: pct}
     for key, dd in dimc.items():
@@ -1045,7 +1082,7 @@ def suggest_pen(version_id: int, months: int = 0):
         if tot > 0: dim_split[key] = {dc: dd.get(dc, 0.0) / tot for dc in export_dcs}
     # customer's dimensional mix (weights) from their own actuals (all DCs)
     cust_dim_mix = defaultdict(lambda: defaultdict(float))   # cid -> {(kind,val): units}
-    for cd in DB.select("actual_cust_dim"):
+    for cd in DB.select("actual_cust_dim", {"version_id": version_id}):
         cid = _resolve(cd["customer_name"])
         if cid in (None, "COSTCO_GROUP"):
             if cid == "COSTCO_GROUP":
@@ -1264,7 +1301,7 @@ def compute_model(version_id: int, ignore_overrides: bool = False):
 
     fc = {(r["period_id"], r["channel_code"]): r["units"] for r in DB.select("forecast_channel", {"version_id": version_id})}
     fcust = {(r["period_id"], r["customer_id"]): r["units"] for r in DB.select("forecast_customer", {"version_id": version_id})}
-    acts = DB.select("actual", {"cycle_id": cyc["id"]})
+    acts = DB.select("actual", {"version_id": version_id})
     A = defaultdict(float)
     for a in acts: A[(a["period_id"], a["dc_code"], a["channel_code"], a["kind"])] += a["units"]
     per_sort = {p["id"]: p["sort"] for p in periods}
@@ -1871,8 +1908,8 @@ def rates_suggest(version_id: int, months: int = 6):
             w = 0.85 ** age
             if h["kind"] == "GROSS": gross[h["dc_code"]] += h["units"] * w
             elif h["kind"] == "RETURN": ret[h["dc_code"]] += h["units"] * w
-        # accessories aren't in history table; use current-cycle actuals for acc ratio
-    acts = DB.select("actual", {"cycle_id": v[0]["cycle_id"]})
+        # accessories aren't in history table; use this week's actuals for acc ratio
+    acts = DB.select("actual", {"version_id": version_id})
     cyc_gross = defaultdict(float)
     for a in acts:
         if a["kind"] == "GROSS": cyc_gross[a["dc_code"]] += a["units"]
@@ -1896,8 +1933,8 @@ def dummy_suggest(version_id: int, weeks: int = 26):
     v = DB.select("version", {"id": version_id})
     if not v: raise HTTPException(404, "version not found")
     hist = DB.select("history")
-    # dummies live in actual table (kind DUMMY) for current cycle; use that as run-rate basis
-    acts = DB.select("actual", {"cycle_id": v[0]["cycle_id"]})
+    # dummies live in actual table (kind DUMMY) for this week; use that as run-rate basis
+    acts = DB.select("actual", {"version_id": version_id})
     by_dc_wk = defaultdict(list)
     for a in acts:
         if a["kind"] == "DUMMY": by_dc_wk[a["dc_code"]].append(a["units"])
@@ -2070,7 +2107,7 @@ def validate_tieout(version_id: int):
 
     # 2) Actuals tie-out: DB gross by DC vs actuals import preview
     act_log = last_log("ACTUALS")
-    acts = DB.select("actual", {"cycle_id": m["cycle"]["id"]})
+    acts = DB.select("actual", {"version_id": version_id})
     by_dc = defaultdict(float)
     for a in acts:
         if a["kind"] == "GROSS" and a["channel_code"]: by_dc[a["dc_code"]] += a["units"]
