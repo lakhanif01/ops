@@ -1,0 +1,1405 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OPS — DC Ship Forecast</title>
+<style>
+:root{
+  --navy:#1F3864; --navy-2:#16294A; --navy-soft:#EDF1F8;
+  --amber:#B45E00; --amber-soft:#FBF0E1;
+  --bg:#F4F6F9; --card:#FFFFFF; --line:#DDE3EC; --line-2:#C4CDDB;
+  --ink:#1B2430; --mut:#5A6472; --faint:#8B94A3;
+  --act:#E9ECF1; --ovr:#FCE8D2; --neg:#FFF4E8;
+  --ok:#1F3864; --r:10px;
+  font-size:15px;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;background:var(--bg);color:var(--ink);height:100vh;display:flex;flex-direction:column;overflow:hidden}
+button{font:inherit;cursor:pointer}
+input,select,textarea{font:inherit;color:var(--ink)}
+/* header */
+header{background:var(--navy-2);color:#fff;display:flex;align-items:center;gap:14px;padding:0 18px;height:52px;flex:none}
+header .logo{font-weight:800;letter-spacing:.4px;font-size:16px}
+header .logo span{color:#9DB7E0;font-weight:600}
+header .spacer{flex:1}
+.chip{background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.25);border-radius:20px;padding:3px 12px;font-size:12.5px}
+.chip.ok{border-color:#7FB2FF}
+.chip.bad{background:#5A3200;border-color:var(--amber)}
+select.hdr{background:#233A63;color:#fff;border:1px solid #3D5685;border-radius:8px;padding:5px 8px;font-size:13px}
+/* layout */
+#shell{display:flex;flex:1;min-height:0}
+nav{width:218px;flex:none;background:var(--card);border-right:1px solid var(--line);padding:14px 10px;overflow-y:auto}
+nav .grp{font-size:10.5px;font-weight:700;letter-spacing:.12em;color:var(--faint);text-transform:uppercase;margin:14px 8px 4px}
+nav .grp:first-child{margin-top:0}
+nav a{display:flex;align-items:center;gap:9px;padding:8px 10px;border-radius:8px;color:var(--ink);text-decoration:none;font-size:13.5px;font-weight:500}
+nav a:hover{background:var(--navy-soft)}
+nav a.on{background:var(--navy);color:#fff}
+nav a .dot{width:7px;height:7px;border-radius:50%;background:var(--line-2);flex:none}
+nav a.done .dot{background:var(--navy)}
+nav a.sub{padding-left:22px;font-size:13px}
+nav a.sub .dot{width:5px;height:5px}
+main{flex:1;overflow:auto;padding:20px 24px 60px}
+h1{font-size:19px;font-weight:700;margin-bottom:4px}
+.sub{color:var(--mut);font-size:13px;margin-bottom:16px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:var(--r);padding:16px;margin-bottom:16px}
+.card h2{font-size:14px;font-weight:700;margin-bottom:10px;color:var(--navy)}
+.row{display:flex;gap:14px;flex-wrap:wrap}
+.kpi{flex:1;min-width:160px;background:var(--card);border:1px solid var(--line);border-radius:var(--r);padding:14px 16px}
+.kpi .lbl{font-size:11.5px;color:var(--mut);font-weight:600;text-transform:uppercase;letter-spacing:.06em}
+.kpi .val{font-size:24px;font-weight:800;margin-top:3px;font-variant-numeric:tabular-nums}
+.kpi .sub2{font-size:12px;color:var(--mut);margin-top:2px}
+.fav{color:var(--navy);font-weight:700}
+.unf{color:var(--amber);font-weight:700}
+/* buttons */
+.btn{background:var(--navy);color:#fff;border:none;border-radius:8px;padding:8px 14px;font-weight:600;font-size:13px}
+.btn:hover{background:#2A4A80}
+.btn.sec{background:var(--card);color:var(--navy);border:1px solid var(--line-2)}
+.btn.sec:hover{background:var(--navy-soft)}
+.btn.warn{background:var(--amber)}
+.btn:disabled{opacity:.45;cursor:not-allowed}
+.btn.sm{padding:5px 10px;font-size:12px}
+/* tables */
+.twrap{overflow:auto;max-height:calc(100vh - 260px);border:1px solid var(--line);border-radius:var(--r);background:var(--card)}
+table{border-collapse:separate;border-spacing:0;font-size:12.5px;font-variant-numeric:tabular-nums;width:max-content;min-width:100%}
+th{background:var(--navy-soft);color:var(--navy);font-weight:700;padding:7px 9px;text-align:right;position:sticky;top:0;z-index:2;border-bottom:1px solid var(--line-2);white-space:nowrap}
+th:first-child,td:first-child{text-align:left;position:sticky;left:0;background:var(--card);z-index:3;border-right:1px solid var(--line)}
+th:first-child{z-index:4;background:var(--navy-soft)}
+td{padding:6px 9px;text-align:right;border-bottom:1px solid var(--line);white-space:nowrap}
+tr.actual td{background:var(--act)}
+tr.actual td:first-child{background:var(--act)}
+td.ovr{background:var(--ovr) !important;font-weight:600}
+td.neg{background:var(--neg) !important;color:var(--amber);font-weight:700}
+td.clickable{cursor:pointer}
+td.clickable:hover{outline:2px solid var(--navy);outline-offset:-2px}
+tr.total td{font-weight:800;border-top:2px solid var(--navy);background:var(--navy-soft)}
+tr.total td:first-child{background:var(--navy-soft)}
+.legend{display:flex;gap:16px;font-size:12px;color:var(--mut);margin:8px 2px}
+.sw{display:inline-block;width:12px;height:12px;border-radius:3px;vertical-align:-2px;margin-right:5px;border:1px solid var(--line-2)}
+/* editable cells */
+td input.cell{width:74px;border:1px solid var(--line-2);border-radius:6px;padding:3px 6px;text-align:right;font-size:12.5px}
+td input.cell:focus{outline:2px solid var(--navy)}
+/* drawer */
+#drawer{position:fixed;top:0;right:-420px;width:400px;height:100%;background:var(--card);border-left:1px solid var(--line);box-shadow:-8px 0 24px rgba(20,35,60,.12);transition:right .18s ease;z-index:50;padding:20px;overflow-y:auto}
+#drawer.open{right:0}
+#drawer h3{font-size:15px;color:var(--navy);margin-bottom:12px}
+#drawer label{display:block;font-size:12px;font-weight:600;color:var(--mut);margin:12px 0 4px}
+#drawer input,#drawer textarea{width:100%;border:1px solid var(--line-2);border-radius:8px;padding:8px}
+/* imports */
+.impgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:14px}
+.imp{background:var(--card);border:1px solid var(--line);border-radius:var(--r);padding:14px}
+.imp h3{font-size:13.5px;color:var(--navy);margin-bottom:2px}
+.imp p{font-size:12px;color:var(--mut);margin-bottom:10px}
+.imp .files{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.imp input[type=file]{font-size:12px;max-width:200px}
+.pv{background:var(--navy-soft);border-radius:8px;padding:10px;font-size:12px;margin-top:10px;white-space:pre-wrap;max-height:180px;overflow:auto;display:none}
+.badge{display:inline-block;background:var(--navy-soft);color:var(--navy);border-radius:20px;padding:2px 10px;font-size:11.5px;font-weight:700;margin-left:6px}
+.badge.amb{background:var(--amber-soft);color:var(--amber)}
+/* misc */
+.tabs{display:flex;gap:6px;margin-bottom:12px}
+.tabs button{background:var(--card);border:1px solid var(--line-2);border-radius:20px;padding:6px 14px;font-size:12.5px;font-weight:600;color:var(--mut)}
+.tabs button.on{background:var(--navy);border-color:var(--navy);color:#fff}
+.warnbox{background:var(--amber-soft);border:1px solid #E3C79F;border-radius:var(--r);padding:12px 14px;margin-bottom:14px;font-size:13px}
+.warnbox ul{margin:6px 0 0 18px}
+.drillpath{display:flex;align-items:center;flex-wrap:wrap;gap:4px;margin-bottom:12px}
+.dchip{display:inline-flex;align-items:center;gap:4px;background:var(--navy-soft);border:1px solid var(--line-2);border-radius:16px;padding:3px 8px;font-size:12px;font-weight:600;color:var(--navy)}
+.dchip button{border:none;background:transparent;color:var(--navy);cursor:pointer;font-size:11px;padding:0 2px;border-radius:4px}
+.dchip button:hover:not(:disabled){background:var(--line-2)}
+.dchip button:disabled{opacity:.3;cursor:default}
+.darr{color:var(--faint);font-size:12px;margin:0 2px}
+tr.lvl0 td:first-child{font-weight:700}
+tr.lvl1 td:first-child{font-weight:500}
+tr.lvl2 td:first-child,tr.lvl3 td:first-child{font-weight:400;color:var(--mut)}
+.exp{display:inline-block;width:14px}
+th.totcol,td.totcol{background:var(--navy-soft);border-right:2px solid var(--line-2)}
+/* pin first two columns (Wk·Mo + Total) in the customer grid so they stay while scrolling right */
+.custgrid td:first-child,.custgrid th:first-child{position:sticky;left:0;z-index:3;background:var(--card);border-right:1px solid var(--line);min-width:70px;max-width:70px}
+.custgrid tr.actual td:first-child{background:#EEF1F5}
+.custgrid tr.total td:first-child{background:var(--navy-soft)}
+.custgrid td.totcol,.custgrid th.totcol{position:sticky;left:70px;z-index:3;min-width:96px}
+.custgrid th:first-child,.custgrid th.totcol{z-index:4}
+.note{font-size:12px;color:var(--mut)}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+@media(max-width:1100px){.grid2{grid-template-columns:1fr}}
+.navtoggle{display:none;background:transparent;border:none;color:#fff;font-size:22px;cursor:pointer;padding:4px 8px;margin-right:2px}
+.navscrim{display:none;position:fixed;inset:0;background:rgba(0,0,0,.4);z-index:90}
+/* ---- mobile ---- */
+@media(max-width:820px){
+  header{height:50px;padding:0 10px;gap:8px}
+  header .logo{font-size:14px}
+  header select.hdr{max-width:130px;font-size:12px}
+  .chip{font-size:11px;padding:2px 8px}
+  #userChip{display:none}
+  .navtoggle{display:block}
+  nav{position:fixed;top:50px;bottom:0;left:0;width:250px;z-index:100;transform:translateX(-100%);transition:transform .2s ease;box-shadow:2px 0 12px rgba(0,0,0,.15)}
+  nav.open{transform:translateX(0)}
+  .navscrim.show{display:block}
+  main{padding:14px 12px 60px}
+  h1{font-size:17px}
+  .card{padding:12px}
+  .kpi{min-width:100%}
+  table{font-size:12px}
+  th,td{padding:5px 6px!important}
+  .drillpath{gap:3px}
+  .dchip{font-size:11px;padding:2px 6px}
+  .btn{padding:8px 12px}
+  input[type=file]{max-width:190px}
+}
+@media(max-width:820px){.grid2{grid-template-columns:1fr}}
+.toast{position:fixed;bottom:22px;left:50%;transform:translateX(-50%);background:var(--navy-2);color:#fff;padding:10px 20px;border-radius:24px;font-size:13px;z-index:99;opacity:0;transition:opacity .2s}
+.toast.show{opacity:1}
+.inline-input{border:1px solid var(--line-2);border-radius:8px;padding:7px 10px;font-size:13px}
+.spin{display:inline-block;width:14px;height:14px;border:2px solid var(--line-2);border-top-color:var(--navy);border-radius:50%;animation:sp 1s linear infinite;vertical-align:-2px}
+@keyframes sp{to{transform:rotate(360deg)}}
+</style>
+</head>
+<body>
+<div id="fatalBox" style="display:none;padding:20px;font-family:-apple-system,system-ui,sans-serif;color:#1B2430">
+  <h2 style="color:#1F3864;margin:0 0 8px">OPS — DC Ship Forecast</h2>
+  <p id="fatalMsg" style="margin:0 0 12px">Something went wrong while loading.</p>
+  <button onclick="location.reload()" style="background:#1F3864;color:#fff;border:none;border-radius:8px;padding:10px 16px;font-size:15px">Reload</button>
+</div>
+<script>
+// Absolute last-resort guard: if anything throws before the app renders, show a message — never a blank page.
+window.addEventListener("error",function(ev){
+  try{
+    var shell=document.getElementById("shell"), hdr=document.querySelector("header"), gate=document.getElementById("authgate");
+    var appVisible=(shell&&shell.style.display!=="none")||(gate)||(hdr&&hdr.style.display!=="none");
+    if(!appVisible){
+      var fb=document.getElementById("fatalBox"), fm=document.getElementById("fatalMsg");
+      if(fb){fb.style.display="block"; if(fm) fm.textContent="Load error: "+(ev.message||"unknown")+". Tap Reload. If this persists, try a normal (non-private) tab.";}
+    }
+  }catch(e){}
+});
+</script>
+<header style="display:none">
+  <button id="navToggle" class="navtoggle" onclick="toggleNav()" aria-label="Menu">☰</button>
+  <div class="logo">OPS <span>/ DC Ship Forecast</span></div>
+  <select class="hdr" id="verSel" onchange="pickVersion(this.value)"></select>
+  <button class="btn sm sec" onclick="show('versions')">+ New week</button>
+  <div class="spacer"></div>
+  <span class="chip" id="warnChip" style="display:none;cursor:pointer" onclick="show('dashboard')">▼ warnings</span>
+  <span class="chip" id="alignChip">checking…</span>
+</header>
+<div id="shell" style="display:none">
+<nav id="nav">
+  <div class="grp">Review</div>
+  <a href="#" data-v="dashboard" onclick="return show('dashboard')"><span class="dot"></span>Dashboard</a>
+  <a href="#" data-v="cap" onclick="return show('cap')"><span class="dot"></span>Capacity (DC view)</a>
+  <div class="grp">1 · Actualize + Relink</div>
+  <a class="sub" href="#" data-v="imports" onclick="return show('imports')"><span class="dot"></span>Imports</a>
+  <div class="grp">2 · BY DC</div>
+  <a class="sub" href="#" data-v="atl" onclick="return show('atl')"><span class="dot"></span>Atlanta</a>
+  <a class="sub" href="#" data-v="mx" onclick="return show('mx')"><span class="dot"></span>Mexico</a>
+  <a class="sub" href="#" data-v="direct" onclick="return show('direct')"><span class="dot"></span>Direct (residual)</a>
+  <a class="sub" href="#" data-v="cust" onclick="return show('cust')"><span class="dot"></span>Direct by customer</a>
+  <div class="grp">3 · Derive</div>
+  <a class="sub" href="#" data-v="pen" onclick="return show('pen')"><span class="dot"></span>Penetration %</a>
+  <a class="sub" href="#" data-v="rates" onclick="return show('rates')"><span class="dot"></span>Rates &amp; dummies</a>
+  <div class="grp">4 · Check + Send</div>
+  <a class="sub" href="#" data-v="valid" onclick="return show('valid')"><span class="dot"></span>Validation</a>
+  <a class="sub" href="#" data-v="versions" onclick="return show('versions')"><span class="dot"></span>Versions &amp; vs LW</a>
+  <a class="sub" href="#" data-v="export" onclick="return show('export')"><span class="dot"></span>Export for DCs</a>
+  <div class="grp">Setup</div>
+  <a href="#" data-v="admin" onclick="return show('admin')"><span class="dot"></span>Admin</a>
+</nav>
+<div id="navScrim" class="navscrim" onclick="closeNav()"></div>
+<main id="main"></main>
+</div>
+<div id="drawer"></div>
+<div class="toast" id="toast"></div>
+
+<script>
+"use strict";
+const APP_VERSION="1.5.7", FRONT_BUILD="2026-07-21-23";
+// Safe storage — mobile Safari (Private mode) THROWS on localStorage access, which would
+// halt the whole script and show a blank page. This wrapper degrades to an in-memory map.
+const _mem={};
+const store={
+  get(k){ try{ return localStorage.getItem(k); }catch(e){ return _mem[k]??null; } },
+  set(k,v){ try{ localStorage.setItem(k,v); }catch(e){ _mem[k]=v; } },
+  del(k){ try{ localStorage.removeItem(k); }catch(e){ delete _mem[k]; } }
+};
+const qs=new URLSearchParams(location.search);
+const DEFAULT_API="https://ops-production-5414.up.railway.app";  // baked-in fallback so the bare domain works on mobile/private tabs
+const API=(qs.get("api")||store.get("ops_api")||DEFAULT_API||"").replace(/\/$/,"");
+if(qs.get("api")) store.set("ops_api",qs.get("api"));
+window.__API=API; window.__DEFAULT_API=DEFAULT_API;  // diagnostics
+
+let BOOT=null, VID=null, MODEL=null, VIEW="dashboard", CUSTTAB="ALL", LOADING=false;
+let AUTH={token:store.get("ops_token")||"", user:null, role:"", must_change:false};
+let DRILL={dc:"",product:"",month:""};
+const fmt=n=>n==null?"—":Math.round(n).toLocaleString("en-US");
+const fmt1=n=>n==null?"—":Math.round(n).toLocaleString("en-US");  // whole + commas (was 1 decimal)
+const pct=n=>n==null?"—":(n*100).toFixed(1)+"%";
+const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const $=id=>document.getElementById(id);
+
+function toast(msg){const t=$("toast");t.textContent=msg;t.classList.add("show");setTimeout(()=>t.classList.remove("show"),2600);}
+async function api(path,opts={}){
+  opts.headers=opts.headers||{};
+  if(AUTH.token) opts.headers["Authorization"]="Bearer "+AUTH.token;
+  const r=await fetch(API+path,opts);
+  if(!r.ok){
+    let d="";try{d=(await r.json()).detail||"";}catch(e){}
+    // session expired mid-use (had a token, a normal call got 401): bounce to login
+    if(r.status===401 && AUTH.token && !path.startsWith("/auth/login")){
+      AUTH.token="";store.del("ops_token");renderAuthGate();
+    }
+    throw new Error(d||("HTTP "+r.status));
+  }
+  return r.json();
+}
+
+// ---------- boot ----------
+async function boot(){
+  let vOk=false;
+  try{
+    const v=await api("/version");
+    vOk=v.version===APP_VERSION;
+    window.__ENGINE=v;
+    $("alignChip").textContent=(vOk?"✓ ":"▲ ")+"UI "+APP_VERSION+" · engine "+v.version+" b"+(v.build||"?")+" · "+v.db_mode;
+    $("alignChip").className="chip "+(vOk?"ok":"bad");
+    $("alignChip").title="Frontend build "+FRONT_BUILD+" · backend build "+(v.build||"?");
+  }catch(e){
+    // Backend unreachable (or API base not set). NEVER leave a blank page — show a clear message.
+    var hdr=document.querySelector("header"); if(hdr) hdr.style.display="flex";
+    $("alignChip").textContent="▼ backend offline"; $("alignChip").className="chip bad";
+    var main=document.getElementById("main"), shell=document.getElementById("shell");
+    if(shell) shell.style.display="flex";
+    if(main){
+      main.innerHTML='<h1>Can\'t reach the forecast engine</h1>'
+        +'<div class="card"><p>'+(API?('The app loaded but couldn\'t reach the backend at <code>'+esc(API)+'</code>.'):'No backend address is set for this session.')+'</p>'
+        +'<p class="note">'+(API?'The engine may be starting up (wait ~30s and reload) or the address may be wrong.':'Open the app once with the API address in the link, e.g. <code>?api=https://ops-production-5414.up.railway.app</code> — it will be remembered for normal tabs. In a Private/Incognito tab it is not saved, so use the full link each time.')+'</p>'
+        +'<button class="btn" onclick="location.reload()">Reload</button></div>';
+    }
+    return;
+  }
+  // require login
+  if(AUTH.token){
+    try{ const me=await api("/auth/me"); AUTH.user=me.username; AUTH.role=me.role; AUTH.must_change=me.must_change; }
+    catch(e){ AUTH.token=""; store.del("ops_token"); }
+  }
+  if(!AUTH.token){ renderAuthGate(); return; }
+  if(AUTH.must_change){ renderAuthGate(true); return; }
+  document.getElementById("shell").style.display="flex";
+  document.querySelector("header").style.display="flex";
+  renderUserChip();
+  await reloadBoot();
+  if(BOOT&&BOOT.versions.length){pickVersion(BOOT.versions[0].id);}
+  else show("versions");
+}
+
+function renderAuthGate(forceChange){
+  document.getElementById("shell").style.display="none";
+  document.querySelector("header").style.display="none";
+  const wrap=document.createElement("div");
+  wrap.id="authgate";
+  wrap.style.cssText="position:fixed;inset:0;background:var(--bg);display:flex;align-items:center;justify-content:center;z-index:200";
+  const existing=document.getElementById("authgate"); if(existing) existing.remove();
+  if(forceChange||AUTH.must_change){
+    wrap.innerHTML=`<div class="card" style="width:380px">
+      <h2>Set a new password</h2>
+      <p class="note">First login for <b>${esc(AUTH.user||"you")}</b> — choose a password (min 8 chars).</p>
+      <input id="ag_pw" type="password" class="inline-input" style="width:100%;margin:10px 0" placeholder="New password">
+      <input id="ag_pw2" type="password" class="inline-input" style="width:100%;margin-bottom:10px" placeholder="Confirm password">
+      <button class="btn" style="width:100%" onclick="doChangePw()">Save & continue</button>
+      <div id="ag_err" class="note" style="color:var(--amber);margin-top:8px"></div></div>`;
+  }else{
+    wrap.innerHTML=`<div class="card" style="width:360px">
+      <h2 style="color:var(--navy)">OPS · DC Ship Forecast</h2>
+      <p class="note">Sign in to continue.</p>
+      <input id="ag_user" class="inline-input" style="width:100%;margin:10px 0" placeholder="Username" autocomplete="username">
+      <input id="ag_pass" type="password" class="inline-input" style="width:100%;margin-bottom:10px" placeholder="Password" autocomplete="current-password">
+      <button class="btn" style="width:100%" onclick="doLogin()">Sign in</button>
+      <div id="ag_err" class="note" style="color:var(--amber);margin-top:8px"></div></div>`;
+  }
+  document.body.appendChild(wrap);
+  const first=document.getElementById(forceChange||AUTH.must_change?"ag_pw":"ag_user"); if(first) first.focus();
+  ["ag_pass","ag_pw2"].forEach(id=>{const el=document.getElementById(id); if(el) el.addEventListener("keydown",e=>{if(e.key==="Enter"){forceChange||AUTH.must_change?doChangePw():doLogin();}});});
+}
+async function doLogin(){
+  const u=document.getElementById("ag_user").value.trim(), p=document.getElementById("ag_pass").value;
+  try{
+    const r=await api("/auth/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({username:u,password:p})});
+    AUTH.token=r.token; AUTH.user=r.username; AUTH.role=r.role; AUTH.must_change=r.must_change;
+    store.set("ops_token",r.token);
+    document.getElementById("authgate").remove();
+    boot();
+  }catch(e){document.getElementById("ag_err").textContent="▼ "+e.message;}
+}
+async function doChangePw(){
+  const p1=document.getElementById("ag_pw").value, p2=document.getElementById("ag_pw2").value;
+  if(p1!==p2){document.getElementById("ag_err").textContent="▼ Passwords don't match";return;}
+  if(p1.length<8){document.getElementById("ag_err").textContent="▼ Min 8 characters";return;}
+  try{
+    await api("/auth/change_password",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({new_password:p1})});
+    AUTH.must_change=false;
+    document.getElementById("authgate").remove();
+    boot();
+  }catch(e){document.getElementById("ag_err").textContent="▼ "+e.message;}
+}
+function renderUserChip(){
+  let c=document.getElementById("userChip");
+  if(!c){c=document.createElement("span");c.id="userChip";c.className="chip";c.style.cssText="cursor:pointer;margin-left:8px";
+    c.onclick=doLogout; document.querySelector("header .spacer").after(c);}
+  c.textContent="⎋ "+(AUTH.user||"")+" ("+AUTH.role+")";
+  c.title="Click to sign out";
+}
+async function doLogout(){
+  try{await api("/auth/logout",{method:"POST"});}catch(e){}
+  AUTH.token="";AUTH.user=null;store.del("ops_token");
+  location.reload();
+}
+async function reloadBoot(){
+  try{BOOT=await api("/bootstrap");renderVerSel();}
+  catch(e){$("main").innerHTML=`<div class="card"><h2>Backend not reachable</h2>
+    <p class="note">Set the API base with <code>?api=https://your-space.hf.space</code> in the URL. Current: <code>${esc(API||"same origin")}</code></p></div>`;}
+}
+function renderVerSel(){
+  const s=$("verSel");
+  s.innerHTML=BOOT.versions.map(v=>{
+    const c=BOOT.cycles.find(c=>c.id===v.cycle_id)||{};
+    return `<option value="${v.id}" ${v.id==VID?"selected":""}>${esc(c.label||"")} · ${esc(v.week_tag)}${v.published?" ✓":""}</option>`;
+  }).join("")||"<option>— no versions —</option>";
+}
+async function pickVersion(id){
+  VID=+id; MODEL=null; renderVerSel();
+  await refreshModel();
+  show(VIEW);
+}
+async function refreshModel(){
+  if(!VID) return;
+  LOADING=true; renderNavDots();
+  try{
+    MODEL=await api("/model?version_id="+VID);
+    try{ MODEL._baseline=await api("/plan_baseline?version_id="+VID); }catch(_){ MODEL._baseline=null; }
+  }
+  catch(e){MODEL=null;toast("Model: "+e.message);}
+  LOADING=false;
+  const w=$("warnChip");
+  const n=MODEL?MODEL.warnings.length:0;
+  w.style.display=n?"inline-block":"none";
+  w.textContent="▼ "+n+" warning"+(n>1?"s":"");
+  renderNavDots();
+}
+function applyRoleVisibility(){
+  const role=AUTH.role||"";
+  // viewers: no Imports, no CHECK+SEND (validation, versions, export)
+  const viewerHidden=["imports","valid","versions","export"];
+  // planners+viewers: no Admin
+  const adminOnly=["admin"];
+  document.querySelectorAll("nav a").forEach(a=>{
+    const v=a.dataset.v; let hide=false;
+    if(role==="viewer" && viewerHidden.includes(v)) hide=true;
+    if(role!=="admin" && adminOnly.includes(v)) hide=true;
+    a.style.display=hide?"none":"";
+  });
+  // hide section headers whose items are all hidden
+  document.querySelectorAll("nav .grp").forEach(g=>{
+    let n=g.nextElementSibling, anyVisible=false;
+    while(n && n.tagName==="A"){ if(n.style.display!=="none") anyVisible=true; n=n.nextElementSibling; }
+    g.style.display=anyVisible?"":"none";
+  });
+}
+function renderNavDots(){
+  const hasFC=MODEL&&Object.keys(MODEL.grids||{}).length&&MODEL.grids.ATL.rows.some(r=>r.gross>0);
+  const hasAct=MODEL&&MODEL.actualized_periods.length>0;
+  document.querySelectorAll("nav a").forEach(a=>{
+    const v=a.dataset.v;
+    a.classList.toggle("on",v===VIEW);
+    a.classList.toggle("done",(v==="imports"&&hasAct)||((v==="atl"||v==="mx")&&hasFC));
+  });
+  applyRoleVisibility();
+}
+
+// ---------- router ----------
+function toggleNav(){
+  const n=$("nav"), s=document.getElementById("navScrim");
+  const open=n.classList.toggle("open");
+  if(s) s.classList.toggle("show",open);
+}
+function closeNav(){
+  const n=$("nav"), s=document.getElementById("navScrim");
+  if(n)n.classList.remove("open"); if(s)s.classList.remove("show");
+}
+function show(v){
+  closeNav();
+  // block hidden views by role
+  const role=AUTH.role||"";
+  if(role==="viewer" && ["imports","valid","versions","export"].includes(v)) v="dashboard";
+  if(role!=="admin" && v==="admin") v="dashboard";
+  VIEW=v; renderNavDots(); closeDrawer();
+  const m=$("main");
+  if(!BOOT){m.innerHTML="";return false;}
+  const fns={dashboard:vDash,imports:vImports,atl:()=>vGrid("ATL"),mx:()=>vGrid("MX"),
+    direct:()=>vGrid("DIRECT"),cust:vCust,pen:vPen,cap:vCap,valid:vValid,rates:vRates,versions:vVersions,export:vExport,admin:vAdmin};
+  m.innerHTML=(fns[v]||vDash)();
+  if(v==="versions") loadVs();
+  return false;
+}
+function needModel(){
+  if(LOADING) return `<div class="card"><span class="spin"></span> Computing model…</div>`;
+  if(!VID) return `<div class="card">Create or select a version first (top bar).</div>`;
+  if(!MODEL) return `<div class="card">No model yet — import the NA file and actuals under <b>Imports</b>.</div>`;
+  return null;
+}
+
+// ---------- dashboard ----------
+function vDash(){
+  const nm=needModel(); if(nm) return `<h1>Dashboard</h1>${nm}`;
+  const S=MODEL.summary, months=[...new Set(MODEL.periods.map(p=>p.month_no))];
+  const MN=["","Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+  const kpi=(dc,label)=>{
+    const t=S[dc]?.total?.gross||0,q=S[dc]?.qtd?.gross||0,g=S[dc]?.togo?.gross||0;
+    return `<div class="kpi"><div class="lbl">${label}</div><div class="val">${fmt(t)}</div>
+      <div class="sub2">QTD ${fmt(q)} · To go ${fmt(g)}</div></div>`;
+  };
+  let mtbl=`<table><tr><th>Month</th><th>Atlanta</th><th>Mexico</th><th>Direct</th><th>Italy</th><th>China</th><th>Thailand</th></tr>`;
+  months.forEach(mo=>{
+    mtbl+=`<tr><td>${MN[mo]}</td>`+["ATL","MX","DIRECT","IT","CN","TH"].map(dc=>
+      `<td>${fmt(S[dc]?.months?.[mo]?.gross)}</td>`).join("")+`</tr>`;});
+  mtbl+=`<tr class="total"><td>Q total</td>`+["ATL","MX","DIRECT","IT","CN","TH"].map(dc=>
+      `<td>${fmt(S[dc]?.total?.gross)}</td>`).join("")+`</tr></table>`;
+  const warns=MODEL.warnings.length?`<div class="warnbox"><b>▼ ${MODEL.warnings.length} checks need a look</b> (word + symbol, unfavorable)
+    <ul>${MODEL.warnings.slice(0,12).map(w=>`<li>${esc(w)}</li>`).join("")}</ul>
+    ${MODEL.warnings.length>12?`<div class="note">…and ${MODEL.warnings.length-12} more</div>`:""}</div>`:
+    `<div class="card" style="border-color:var(--navy)"><b class="fav">▲ All checks clear</b> — no negative export weeks, ties out.</div>`;
+  const act=MODEL.actualized_periods.length;
+  return `<h1>Dashboard</h1>
+  <div class="sub">${esc(MODEL.cycle.label)} · ${esc(MODEL.version.week_tag)} · ${act} week${act===1?"":"s"} actualized (completed weeks only — the in-progress week stays forecast)</div>
+  ${warns}
+  <div class="row">${kpi("ATL","Atlanta gross")}${kpi("MX","Mexico gross")}${kpi("DIRECT","Direct gross")}</div>
+  <div class="card" style="margin-top:16px"><h2>Monthly gross by DC — <span class="note">Remember → months are more reliable than weeks</span></h2>
+  <div class="twrap" style="max-height:none">${mtbl}</div></div>
+  <div class="card"><h2>To-Date / To-Go Drilldown <span class="note">— reorder the path, expand any level; TD = actualized, TG = forecast</span></h2>
+    <div id="drillPath" class="drillpath"></div>
+    <div id="drill"><span class="spin"></span></div></div>
+  <div class="card"><h2>Forecast accuracy (WAPE on actualized weeks) <span class="note">— WAPE = weighted avg % error; lower is better</span></h2><div id="acc"><span class="spin"></span></div></div>`;
+}
+
+// ---------- imports ----------
+function vImports(){
+  if(!VID) return `<h1>Imports</h1><div class="card">Create a version first.</div>`;
+  const card=(id,title,desc,ep,extra)=>`
+  <div class="imp"><h3>${title}</h3><p>${desc}</p>
+    <div class="files"><input type="file" id="f_${id}" accept=".xlsx,.csv">
+      ${extra||""}
+      <button class="btn sm sec" onclick="doImport('${id}','${ep}',false)">Preview</button>
+      <button class="btn sm" onclick="doImport('${id}','${ep}',true)">Commit</button></div>
+    <div class="pv" id="pv_${id}"></div></div>`;
+  return `<h1>Imports</h1>
+  <div class="sub">Monday flow: preview first, commit when the numbers look right. Every commit is additive and logged.</div>
+  <div class="impgrid">
+    ${card("na","1 · NA file (planner forecast)","The NA Invoices workbook — reads the 2026 FC + RW/AW/OW FC tabs by the saved column map.","/import/na")}
+    ${card("act","2 · Actuals (All Channels)","BO weekly export. Net invoices by COT, wearables routed to RW/OW/Nuance, goggles carved from sport. Completed weeks become gray.","/import/actuals")}
+    ${card("acc","3 · Accessories","Flat BO accessories report (Report 2 tab): Year, Month, Week, Invoices, Plant.","/import/accessories")}
+    ${card("dum","4 · Dummies","Dummy workbook — the flat All Channels tab is detected automatically.","/import/dummies")}
+    ${card("cus","5 · Customer forecast (Direct)","Wide grid: customer names across the top, weeks down the side. New customers are auto-added and flagged.","/import/customers",
+      `<input class="inline-input" id="cus_sheet" placeholder="sheet (optional)" style="width:130px">`)}
+      <div class="imp"><h3>6 · History (recency-weighted model)</h3>
+        <p>Same BO All Channels export. <b>Select multiple files at once</b> (Ctrl/Cmd-click) — a rolling 6+ months makes the % / rate / dummy suggestions smarter (recent months weighted higher). Preview shows what was read across all files.</p>
+        <div class="files"><input type="file" id="f_his" accept=".xlsx,.csv" multiple>
+          <button class="btn sm sec" onclick="doHistory(false)">Preview all</button>
+          <button class="btn sm" onclick="doHistory(true)">Commit all</button></div>
+        <div class="pv" id="pv_his"></div></div>
+  </div>
+  <div class="card" style="margin-top:16px"><h2>Week cutoff</h2>
+    <p class="note">Auto rule: the newest week with data is treated as in-progress (forecast). Override only if a completed week is being held back.</p>
+    <div class="row" style="margin-top:8px;align-items:center">
+      <select class="inline-input" id="cutSel">${(MODEL?MODEL.periods:[]).map(p=>`<option value="${p.sort}">${esc(p.label)}</option>`).join("")}</select>
+      <button class="btn sm sec" onclick="setCutoff($('cutSel').value)">Set cutoff (actualize through)</button>
+      <button class="btn sm sec" onclick="setCutoff(null)">Back to auto</button>
+    </div></div>`;
+}
+async function doImport(id,ep,commit){
+  const f=$("f_"+id).files[0];
+  if(!f){toast("Choose a file first");return;}
+  const pv=$("pv_"+id);pv.style.display="block";
+  // On COMMIT: first peek (preview) to see if this import type already loaded for this week; if so, confirm overwrite.
+  if(commit){
+    pv.innerHTML=`<span class="spin"></span> Checking…`;
+    const pf=new FormData();pf.append("file",f);pf.append("version_id",VID);pf.append("commit",false);
+    if(id==="cus")pf.append("sheet",$("cus_sheet").value||"");
+    try{
+      const peek=await api(ep,{method:"POST",body:pf});
+      const meta0=peek.meta||peek;
+      if(meta0.already_imported){
+        if(!confirm("This week already has this import committed.\n\nRe-committing will CLEAN-REPLACE it (old rows for this import are cleared first, then the new file loads — no stale data).\n\nProceed with overwrite?")){
+          pv.innerHTML=`<span class="note">Overwrite cancelled — existing data kept.</span>`;return;
+        }
+      }
+    }catch(e){pv.textContent="▼ "+e.message;return;}
+  }
+  const bigEp=/actuals|dummies|accessories|history/.test(ep);
+  pv.innerHTML=`<span class="spin"></span> ${commit?"Committing":"Previewing"}…${bigEp?" <span class='note'>large file — this can take up to a minute, please don't close the tab</span>":""}`;
+  const fd=new FormData();fd.append("file",f);fd.append("version_id",VID);fd.append("commit",commit);
+  if(id==="cus")fd.append("sheet",$("cus_sheet").value||"");
+  try{
+    const r=await api(ep,{method:"POST",body:fd});
+    const meta=r.meta||r;
+    // surface unmapped COTs/plants prominently with a one-click mapper
+    let warn="";
+    const uc=(meta.unmapped_cot||[]), up2=(meta.unmapped_plants||[]);
+    if(uc.length){
+      warn+=`<div class="warnbox" style="margin:8px 0"><b>▼ ${uc.length} unmapped COT(s)</b> — these rows were skipped. Map each to a channel, then re-import:<br>`
+        +uc.map(c=>`<div style="margin-top:6px">"${esc(c)}" → <select id="map_${btoa(c).replace(/=/g,'')}">${(BOOT.channels||[]).map(ch=>`<option value="${ch.code}">${esc(ch.name)}</option>`).join("")}</select>
+          <button class="btn sm" onclick="mapCot('${esc(c).replace(/'/g,"")}','map_${btoa(c).replace(/=/g,'')}')">Map</button></div>`).join("")
+        +`</div>`;
+    }
+    if(up2.length) warn+=`<div class="warnbox" style="margin:8px 0"><b>▼ ${up2.length} unmapped plant(s):</b> ${up2.map(esc).join(", ")} — add a prefix in Admin → Plant map.</div>`;
+    if(meta.already_imported && !commit) warn+=`<div class="warnbox" style="margin:8px 0">▼ This import already exists for this week. Committing will clean-replace it (no stale rows).</div>`;
+    pv.innerHTML=warn+`<pre style="white-space:pre-wrap;margin:0">${esc(JSON.stringify(meta,null,1).slice(0,1500))}</pre>`;
+    if(commit){toast("Committed ✓");await refreshModel();}
+  }catch(e){pv.textContent="▼ "+e.message;}
+}
+async function doHistory(commit){
+  const files=$("f_his").files;
+  if(!files.length){toast("Choose one or more files");return;}
+  const pv=$("pv_his");pv.style.display="block";
+  pv.innerHTML=`<span class="spin"></span> ${commit?"Committing":"Previewing"} ${files.length} file(s)…`;
+  const fd=new FormData();
+  for(const f of files) fd.append("files",f);
+  fd.append("commit",commit);
+  try{
+    const r=await api("/import/history",{method:"POST",body:fd});
+    const meta=r.meta||r;
+    pv.innerHTML=`<div class="note" style="margin-bottom:6px">Files: ${(meta.files||[]).map(esc).join(", ")}</div>`
+      +`<pre style="white-space:pre-wrap;margin:0">${esc(JSON.stringify(meta,null,1).slice(0,1500))}</pre>`;
+    if(commit){toast(`Committed ${files.length} history file(s) ✓`);await refreshModel();}
+  }catch(e){pv.textContent="▼ "+e.message;}
+}
+async function mapCot(cot,selId){
+  const ch=document.getElementById(selId).value;
+  await api("/admin/cot_alias",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({cot:cot,channel_code:ch})});
+  await reloadBoot();
+  toast("Mapped '"+cot+"' → "+ch+". Re-import to pick it up.");
+}
+async function setCutoff(v){
+  await api(`/version/${VID}/cutoff`,{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({cutoff:v===null?null:+v})});
+  toast(v===null?"Cutoff: auto":"Cutoff set"); await refreshModel(); show("imports");
+}
+
+// ---------- DC grids ----------
+function vGrid(dc){
+  const nm=needModel(); if(nm) return `<h1>${dcName(dc)}</h1>${nm}`;
+  const g=MODEL.grids[dc], chs=MODEL.channels;
+  const isDir=dc==="DIRECT";
+  let h=`<tr><th>Wk · Mo</th><th>Total</th>${chs.map(c=>`<th>${esc(c.name)}</th>`).join("")}`;
+  h+=isDir?`<th>Meta RW</th><th>Meta OW</th>`
+          :`<th>Accessories</th><th>Returns</th><th>Ttl Gross</th><th>Dummies</th><th>RW othr</th><th>Nuance</th><th>OW othr</th>`;
+  h+=`</tr>`;
+  let rows="";
+  const tot={}; chs.forEach(c=>tot[c.code]=0);
+  let tGross=0,tAcc=0,tRet=0,tDum=0,tRw=0,tNu=0,tOw=0,tMr=0,tMo=0;
+  g.rows.forEach(r=>{
+    tGross+=r.gross;
+    let tds=`<td>${esc(r.label)}${r.actual?' <span class="note">act</span>':""}</td><td><b>${fmt(r.gross)}</b></td>`;
+    chs.forEach(c=>{
+      const cell=r.cells[c.code];tot[c.code]+=cell.v;
+      const cls=(cell.src==="override"?"ovr ":"")+(cell.v<0?"neg ":"")+((!r.actual&&!isDir)?"clickable":"");
+      const click=(!r.actual&&!isDir)?`onclick="openOverride('${dc}','CHANNEL','${c.code}',${r.period_id},${cell.v},'${esc(c.name)} · ${esc(r.label)}')"`:"";
+      tds+=`<td class="${cls}" ${click}>${fmt(cell.v)}</td>`;});
+    if(isDir){tMr+=r.meta_rw;tMo+=r.meta_ow;
+      tds+=`<td>${fmt(r.meta_rw)}</td><td>${fmt(r.meta_ow)}</td>`;}
+    else{tAcc+=r.acc;tRet+=r.ret;tDum+=r.dummy;tRw+=r.rw;tNu+=r.nuance;tOw+=r.ow;
+      tds+=`<td>${fmt(r.acc)}</td><td>${fmt(r.ret)}</td><td><b>${fmt(r.ttl)}</b></td>
+            <td>${fmt(r.dummy)}</td><td>${fmt(r.rw)}</td><td>${fmt(r.nuance)}</td><td>${fmt(r.ow)}</td>`;}
+    rows+=`<tr class="${r.actual?"actual":""}">${tds}</tr>`;
+  });
+  let trow=`<tr class="total"><td>Q3 total</td><td>${fmt(tGross)}</td>${chs.map(c=>`<td>${fmt(tot[c.code])}</td>`).join("")}`;
+  trow+=isDir?`<td>${fmt(tMr)}</td><td>${fmt(tMo)}</td>`
+             :`<td>${fmt(tAcc)}</td><td>${fmt(tRet)}</td><td>${fmt(tGross+tAcc+tRet)}</td><td>${fmt(tDum)}</td><td>${fmt(tRw)}</td><td>${fmt(tNu)}</td><td>${fmt(tOw)}</td>`;
+  trow+=`</tr>`;
+  return `<h1>${dcName(dc)}</h1>
+  <div class="sub">${isDir?"Residual = NA total − Atlanta − Mexico per channel. Split to countries under Direct by customer.":"Forecast weeks = penetration % × NA channel forecast. Click a forecast cell to override (reason required)."}</div>
+  <div class="legend"><span><span class="sw" style="background:var(--act)"></span>Actualized (completed week)</span>
+    <span><span class="sw" style="background:var(--ovr)"></span>Override</span>
+    <span><span class="sw" style="background:var(--neg)"></span>▼ Negative — needs a look</span></div>
+  <div class="twrap"><table>${h}${rows}${trow}</table></div>`;
+}
+function dcName(dc){return{ATL:"Atlanta",MX:"Mexico",DIRECT:"Direct (residual)"}[dc]||dc;}
+
+// ---------- customers ----------
+function vCust(){
+  const nm=needModel(); if(nm) return `<h1>Direct by customer</h1>${nm}`;
+  const cg=MODEL.customer_grid, custs=MODEL.customers;
+  const tabs=["ALL","IT","CN","TH"];
+  const names={ALL:"Total forecast",IT:"Italy",CN:"China",TH:"Thailand"};
+  const totLabel={ALL:"Total Direct",IT:"Total Italy",CN:"Total China",TH:"Total Thailand"}[CUSTTAB];
+  let head=`<tr><th>Wk · Mo</th><th class="totcol">${totLabel}</th>${custs.map(c=>`<th>${esc(c.name)}</th>`).join("")}<th>Other</th></tr>`;
+  let rows="",tot={},tT=0,tOther=0;custs.forEach(c=>tot[c.id]=0);
+  const src=CUSTTAB==="ALL"?cg.rows:cg.countries[CUSTTAB].rows;
+  src.forEach(r=>{
+    const other=r.other||0; tOther+=other;
+    let t=CUSTTAB==="ALL"
+      ? (r.reconciled_total!=null?r.reconciled_total:r.total)
+      : (r.actual&&r.actual_total!=null?r.actual_total:(r.reconciled_total!=null?r.reconciled_total:r.total));
+    tT+=t;
+    let tds=`<td>${esc(r.label)}${r.actual?' <span class="note">act</span>':""}</td><td class="totcol"><b>${fmt(t)}</b></td>`;
+    custs.forEach(c=>{
+      const raw=CUSTTAB==="ALL"?(r.cells[c.id]??0):(r.cells[c.id]?r.cells[c.id].v:0);
+      const srcs=CUSTTAB!=="ALL"&&r.cells[c.id]?r.cells[c.id].src:"model";
+      tot[c.id]+=raw;
+      const cls=(srcs==="override"?"ovr ":"")+(raw<0?"neg ":"")+((CUSTTAB!=="ALL"&&!r.actual)?"clickable":"");
+      const click=(CUSTTAB!=="ALL"&&!r.actual)?`onclick="openOverride('${CUSTTAB}','CUSTOMER','${c.id}',${r.period_id},${raw},'${esc(c.name)} · ${esc(r.label)}')"`:"";
+      tds+=`<td class="${cls}" ${click}>${fmt1(raw)}</td>`;});
+    const ocls=Math.abs(other)>0.15*(r.direct_residual||r.reconciled_total||1)?"neg":"";
+    tds+=`<td class="${ocls}" title="Channel Direct residual minus named customers">${fmt1(other)}</td>`;
+    rows+=`<tr class="${r.actual?"actual":""}">${tds}</tr>`;});
+  rows+=`<tr class="total"><td>Q3 total</td><td class="totcol">${fmt(tT)}</td>${custs.map(c=>`<td>${fmt(tot[c.id])}</td>`).join("")}<td>${fmt(tOther)}</td></tr>`;
+  const rec=MODEL.direct_recon||{};
+  const flooredNote=(rec.floored_to_atlanta&&rec.floored_to_atlanta<-0.5)
+    ? ` <b>${fmt(Math.abs(rec.floored_to_atlanta))}</b> of over-allocation was floored off the export DCs (kept in Atlanta — export DCs never carry negatives).` : "";
+  // drift vs original plan (baseline loaded into MODEL._baseline)
+  let driftBanner="";
+  if(MODEL._baseline){
+    const bl=MODEL._baseline;
+    if(CUSTTAB==="ALL"){
+      const liveTot=Math.round(tT), planTot=Math.round(bl.grand_total||0);
+      const d=liveTot-planTot;
+      if(Math.abs(d)>0.5) driftBanner=`<div class="warnbox" style="margin-bottom:8px">${d>0?"▲":"▼"} Plan drift: current Direct total <b>${fmt(liveTot)}</b> vs original plan <b>${fmt(planTot)}</b> (${d>0?"+":""}${fmt(d)}). Hand edits have moved the total ${d>0?"above":"below"} plan.</div>`;
+    } else {
+      const liveCountry=Math.round(Object.values(tot).reduce((a,b)=>a+b,0));
+      const planCountry=Math.round((bl.country_totals||{})[CUSTTAB]||0);
+      const d=liveCountry-planCountry;
+      if(Math.abs(d)>0.5) driftBanner=`<div class="warnbox" style="margin-bottom:8px">${d>0?"▲":"▼"} Plan drift: ${names[CUSTTAB]} named-customer total <b>${fmt(liveCountry)}</b> vs original plan <b>${fmt(planCountry)}</b> (${d>0?"+":""}${fmt(d)}).</div>`;
+    }
+  }
+  const banner=CUSTTAB==="ALL"&&rec.residual_total!=null?
+    `<div class="warnbox" style="background:var(--navy-soft);border-color:var(--line-2)">
+      <b>Reconciliation</b> — named customers <b>${fmt(rec.named_total)}</b> + Other <b>${fmt(rec.other_total)}</b> vs channel Direct residual <b>${fmt(rec.residual_total)}</b>.
+      Other absorbs independents, minor sport, and unlisted customers.${flooredNote}
+      Add a customer in Admin whenever a week's Other runs large and steady.</div>`:"";
+  return `<h1>Direct by customer</h1>
+  <div class="sub">The shaded <b>Total</b> column (first, after Wk·Mo) is everything shipping to that country per week — the sum of all customer columns plus Other. Other = channel residual − named customers, so this view ties to Direct. ▼ flags a week where Other exceeds 15% of residual.</div>
+  <div class="row" style="margin-bottom:10px">
+    <button class="btn warn" onclick="reallocateNegatives()">▼ Reallocate all negatives to Atlanta</button>
+    ${CUSTTAB!=="ALL"?`<button class="btn sec" onclick="openShift()">⇄ Shift units between weeks</button>`:""}
+    <span class="note" style="align-self:center">${CUSTTAB!=="ALL"?"Move volume from one week to another (customer or whole country); total is preserved.":"Zeros every negative export-DC week; returns process through Atlanta."}</span></div>
+  <div class="tabs">${tabs.map(t=>`<button class="${CUSTTAB===t?"on":""}" onclick="CUSTTAB='${t}';show('cust')">${names[t]}</button>`).join("")}</div>
+  ${driftBanner}${banner}
+  <div class="twrap"><table class="custgrid">${head}${rows}</table></div>`;
+}
+
+// ---------- capacity (DC view) ----------
+function vCap(){
+  const nm=needModel(); if(nm) return `<h1>Capacity (DC view)</h1>${nm}`;
+  const cap=MODEL.capacity||{};
+  const next4=(dc)=>{
+    const rows=(cap[dc]?.rows||[]).filter(r=>!r.actual).slice(0,4);
+    return rows.map(r=>`<span class="badge${r.peak?" amb":""}">${esc(r.label)}: ${fmt(r.per_day)}/day${r.peak?" ▼ peak":""}</span>`).join(" ")||"—";
+  };
+  const tbl=(dc,name)=>{
+    const rows=cap[dc]?.rows||[];
+    let t=`<table><tr><th>Wk · Mo</th><th>Workload (gross+acc+ret+dummies)</th><th>Working days</th><th>Units / day</th><th>Flag</th></tr>`;
+    rows.forEach(r=>{
+      t+=`<tr class="${r.actual?"actual":""}"><td>${esc(r.label)}${r.actual?' <span class="note">act</span>':""}</td>
+        <td>${fmt(r.workload)}</td><td>${r.working_days}</td><td><b>${fmt(r.per_day)}</b></td>
+        <td>${r.peak?'<span class="unf">▼ peak — over 120% of median week</span>':'<span class="note">—</span>'}</td></tr>`;});
+    t+=`</table>`;
+    return `<div class="card"><h2>${name} — next 4 weeks: ${next4(dc)}</h2>
+      <div class="twrap" style="max-height:380px">${t}</div></div>`;
+  };
+  return `<h1>Capacity (DC view)</h1>
+  <div class="sub">What the DCs staff against: total boxes handled per working day. Remember → monthly is more reliable than weekly; peak flags are for pre-positioning people, not precision.</div>
+  ${tbl("ATL","Atlanta")}${tbl("MX","Mexico")}
+  <div class="grid2">${["IT","CN","TH"].map(d=>tbl(d,{IT:"Italy",CN:"China",TH:"Thailand"}[d])).join("")}</div>`;
+}
+
+// ---------- overrides drawer ----------
+function openOverride(dc,kind,key,pid,cur,label){
+  const d=$("drawer");
+  d.innerHTML=`<h3>Override — ${esc(label)}</h3>
+  <p class="note">${dc} · replaces the modeled value for this week only. Shows orange everywhere, including the export.</p>
+  <label>New value (units)</label><input id="ov_val" type="number" value="${Math.round(cur)}">
+  <label>Reason (required — this is the audit trail)</label>
+  <textarea id="ov_reason" rows="3" placeholder="e.g. Walmart returns reclass to Atlanta / smooth quarter-end jam"></textarea>
+  <label>Author</label><input id="ov_author" value="${esc(store.get("ops_author")||"")}" placeholder="your name">
+  <div style="margin-top:16px;display:flex;gap:10px">
+    <button class="btn" onclick="saveOverride('${dc}','${kind}','${key}',${pid})">Save override</button>
+    <button class="btn sec" onclick="closeDrawer()">Cancel</button></div>
+  <div style="margin-top:22px"><h3 style="font-size:13px">Active overrides here</h3><div id="ov_list" class="note"><span class="spin"></span></div></div>`;
+  d.classList.add("open");
+  api("/overrides?version_id="+VID).then(list=>{
+    const mine=list.filter(o=>o.dc_code===dc&&o.target_key===String(key));
+    $("ov_list").innerHTML=mine.length?mine.map(o=>
+      `<div style="margin:6px 0">${esc(o.reason)} — <b>${fmt(o.units)}</b> (${esc(o.author||"?")})
+       <button class="btn sm sec" onclick="delOverride(${o.id})">remove</button></div>`).join(""):"none";
+  });
+}
+async function saveOverride(dc,kind,key,pid){
+  const val=+$("ov_val").value, reason=$("ov_reason").value.trim(), author=$("ov_author").value.trim();
+  if(!reason){toast("▼ A reason is required");return;}
+  store.set("ops_author",author);
+  try{
+    await api("/overrides",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({version_id:VID,dc_code:dc,target_kind:kind,target_key:String(key),period_id:pid,units:val,reason,author})});
+    toast("Override saved ✓");closeDrawer();await refreshModel();show(VIEW);
+  }catch(e){toast("▼ "+e.message);}
+}
+function openShift(){
+  const d=$("drawer");
+  const country={IT:"Italy",CN:"China",TH:"Thailand"}[CUSTTAB]||CUSTTAB;
+  const rows=(MODEL.customer_grid.countries[CUSTTAB].rows||[]).filter(r=>!r.actual);
+  const wkOpts=rows.map(r=>`<option value="${r.period_id}">${esc(r.label)}</option>`).join("");
+  const custOpts=MODEL.customers.map(c=>`<option value="${c.id}">${esc(c.name)}</option>`).join("");
+  d.innerHTML=`<h3>Shift units — ${esc(country)}</h3>
+  <p class="note">Move volume from one week to another. Total is preserved. Logged as overrides (orange, auditable).</p>
+  <label>Scope</label>
+  <select id="sh_scope" onchange="document.getElementById('sh_custWrap').style.display=this.value==='customer'?'block':'none'">
+    <option value="customer">One customer</option><option value="country">Whole ${esc(country)} (spread across customers)</option>
+  </select>
+  <div id="sh_custWrap"><label>Customer</label><select id="sh_cust">${custOpts}</select></div>
+  <label>From week</label><select id="sh_from">${wkOpts}</select>
+  <label>To week</label><select id="sh_to">${wkOpts}</select>
+  <label>Units to move</label><input id="sh_units" type="number" min="1" value="100">
+  <label>Reason (required)</label><textarea id="sh_reason" rows="2" placeholder="e.g. pull Amazon forward to WK31 per Eleanor"></textarea>
+  <label>Author</label><input id="sh_author" value="${esc(store.get("ops_author")||"")}" placeholder="your name">
+  <div style="margin-top:16px;display:flex;gap:10px">
+    <button class="btn" onclick="doShift()">Shift units</button>
+    <button class="btn sec" onclick="closeDrawer()">Cancel</button></div>`;
+  d.classList.add("open");
+  // default To = second week
+  const to=$("sh_to"); if(to.options.length>1) to.selectedIndex=1;
+}
+async function doShift(){
+  const scope=$("sh_scope").value, from=+$("sh_from").value, to=+$("sh_to").value;
+  const units=+$("sh_units").value, reason=$("sh_reason").value.trim(), author=$("sh_author").value.trim();
+  if(!reason){toast("▼ A reason is required");return;}
+  if(from===to){toast("▼ From and To must differ");return;}
+  if(!(units>0)){toast("▼ Units must be positive");return;}
+  store.set("ops_author",author);
+  const body={version_id:VID,dc_code:CUSTTAB,scope,period_from:from,period_to:to,units,reason,author};
+  if(scope==="customer") body.customer_id=+$("sh_cust").value;
+  try{
+    const r=await api("/overrides/shift",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+    toast(`Shifted ${fmt(r.moved_total)} units ✓`);closeDrawer();await refreshModel();show("cust");
+  }catch(e){toast("▼ "+e.message);}
+}
+async function reallocateNegatives(){
+  if(!confirm("Create overrides to zero every negative export-DC customer-week (reallocating to Atlanta)? This is additive and logged."))return;
+  try{
+    const r=await api("/overrides/reallocate_negatives",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({version_id:VID,author:AUTH.user||""})});
+    toast(`Reallocated ${r.count} negative${r.count===1?"":"s"} to Atlanta ✓`);
+    await refreshModel(); show("cust");
+  }catch(e){toast("▼ "+e.message);}
+}
+async function delOverride(id){await api("/overrides/"+id,{method:"DELETE"});toast("Removed");closeDrawer();await refreshModel();show(VIEW);}
+function closeDrawer(){$("drawer").classList.remove("open");}
+
+// ---------- penetration ----------
+function vPen(){
+  const nm=needModel(); if(nm) return `<h1>Penetration %</h1>${nm}`;
+  const chs=MODEL.channels, custs=MODEL.customers;
+  const P={}; (MODEL._pen||[]).forEach(p=>P[p.dc_code+"|"+p.target_kind+"|"+p.target_key]=p.pct);
+  const cell=(dc,kind,key)=>`<td><input class="cell" data-k="${dc}|${kind}|${key}" value="${((P[dc+"|"+kind+"|"+key]??0)*100).toFixed(2)}"></td>`;
+  let t1=`<tr><th>Channel</th><th>Atlanta %</th><th>Mexico %</th><th>Direct % (residual)</th></tr>`;
+  chs.forEach(c=>{
+    const a=P["ATL|CHANNEL|"+c.code]??0,m=P["MX|CHANNEL|"+c.code]??0;
+    t1+=`<tr><td>${esc(c.name)}</td>${cell("ATL","CHANNEL",c.code)}${cell("MX","CHANNEL",c.code)}
+      <td class="${1-a-m<0?"neg":""}">${((1-a-m)*100).toFixed(1)}%${1-a-m<0?" ▼":""}</td></tr>`;});
+  ["RW","NUANCE","OW"].forEach(l=>{
+    t1+=`<tr><td>${l} line</td>${cell("ATL","LINE",l)}${cell("MX","LINE",l)}<td class="note">—</td></tr>`;});
+  let t2=`<tr><th>Customer</th><th>Italy %</th><th>China %</th><th>Thailand %</th><th>Sum</th></tr>`;
+  custs.forEach(c=>{
+    const s=(P["IT|CUSTOMER|"+c.id]??0)+(P["CN|CUSTOMER|"+c.id]??0)+(P["TH|CUSTOMER|"+c.id]??0);
+    t2+=`<tr><td>${esc(c.name)}</td>${cell("IT","CUSTOMER",c.id)}${cell("CN","CUSTOMER",c.id)}${cell("TH","CUSTOMER",c.id)}
+      <td class="${s>1.001?"neg":""}">${(s*100).toFixed(0)}%${s>1.001?" ▼ over 100":""}</td></tr>`;});
+  return `<h1>Penetration %</h1>
+  <div class="sub">The steering wheel. Set once per quarter from history, tune mid-quarter on structural change (e.g. Mexico picking up Wearables). Customer % under 100% simply leaves units in the residual.</div>
+  <div class="row" style="margin-bottom:12px;align-items:center">
+    <select class="inline-input" id="sg_months"><option value="0" selected>All history (recommended)</option><option value="3">Trailing 3 months</option><option value="6">Trailing 6 months</option><option value="12">Trailing 12 months</option></select>
+    <button class="btn sec" onclick="suggestPen()">Suggest from actuals</button>
+    <button class="btn sec" id="sg_apply" style="display:none" onclick="applySuggest()">Apply suggestions</button>
+    <button class="btn" onclick="savePen()">Save all %</button></div>
+  <div class="card" id="sg_panel" style="display:none"><h2>Drift — applied % vs trailing actual %</h2>
+    <p class="note" id="sg_basis"></p><div class="twrap" style="max-height:300px" id="sg_tbl"></div></div>
+  <div class="grid2">
+    <div class="card"><h2>Channel × DC</h2><div class="twrap" style="max-height:520px"><table>${t1}</table></div></div>
+    <div class="card"><h2>Customer × country (Direct)</h2><div class="twrap" style="max-height:520px"><table>${t2}</table></div></div>
+  </div>
+  <div class="card" style="margin-top:14px"><h2>Customer name aliases (actuals → forecast)</h2>
+    <p class="note">The penetration engine matches BO actuals names to your forecast customers. When a name differs (e.g. actuals "COSTCO WHOLESALE" vs "COSTCO SUN"), add an alias so its country split is picked up instead of falling to Other. COSTCO variants are auto-grouped.</p>
+    <div id="alias_box"><span class="spin"></span> loading…</div>
+  </div>`;
+}
+async function loadAliases(){
+  try{
+    const [aliases,un]=await Promise.all([api("/customer_aliases"),api("/penetration/unmatched_actuals?version_id="+VID)]);
+    const custOpts=un.customers.map(c=>`<option value="${c.id}">${esc(c.name)}</option>`).join("");
+    let t=`<table><tr><th>Actuals name</th><th>Mapped to</th><th></th></tr>`;
+    aliases.forEach(a=>{t+=`<tr><td>${esc(a.actuals_name)}</td><td>${esc(a.customer_name)}</td>
+      <td><button class="btn sm sec" onclick="delAlias(${a.id})">remove</button></td></tr>`;});
+    t+=`</table>`;
+    let un_t="";
+    if(un.unmatched.length){
+      un_t=`<h3 style="font-size:13px;margin-top:12px">Unmatched actuals names with export volume (${un.unmatched.length})</h3>
+      <table><tr><th>Actuals name</th><th>Export units</th><th>Map to customer</th></tr>`;
+      un.unmatched.slice(0,20).forEach((u,i)=>{
+        un_t+=`<tr><td>${esc(u.actuals_name)}</td><td>${fmt(u.export_units)}</td>
+        <td><select id="al_c_${i}">${custOpts}</select>
+          <button class="btn sm" onclick="addAlias('${esc(u.actuals_name).replace(/'/g,"\\'")}',${i})">map</button></td></tr>`;});
+      un_t+=`</table>`;
+    } else un_t=`<p class="note" style="margin-top:10px">▲ No unmatched export names — every actuals customer maps to a forecast customer.</p>`;
+    $("alias_box").innerHTML=t+un_t;
+  }catch(e){$("alias_box").textContent="▼ "+e.message;}
+}
+async function addAlias(name,i){
+  const cid=+document.getElementById("al_c_"+i).value;
+  try{await api("/customer_aliases",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({actuals_name:name,customer_id:cid})});
+    toast("Alias added ✓ — re-run Suggest to pick it up");loadAliases();}catch(e){toast("▼ "+e.message);}
+}
+async function delAlias(id){
+  try{await api("/customer_aliases/"+id,{method:"DELETE"});toast("Alias removed");loadAliases();}catch(e){toast("▼ "+e.message);}
+}
+async function loadPenIntoModel(){MODEL._pen=await api("/penetration?version_id="+VID);}
+let SUGGEST=null;
+async function suggestPen(){
+  const mo=$("sg_months").value;
+  SUGGEST=await api(`/penetration/suggest?version_id=${VID}&months=${mo}`);
+  const map={};
+  SUGGEST.suggestions.forEach(x=>map[x.dc_code+"|CHANNEL|"+x.target_key]=x.pct);
+  (SUGGEST.customer_suggestions||[]).forEach(x=>map[x.dc_code+"|CUSTOMER|"+x.target_key]=x.pct);
+  SUGGEST._map=map;
+  let t=`<table><tr><th>Cell</th><th>Applied</th><th>Trailing actual</th><th>Drift</th></tr>`;
+  let n=0;
+  document.querySelectorAll("input.cell").forEach(i=>{
+    const sug=map[i.dataset.k];if(sug==null)return;
+    const cur=(+i.value||0)/100, d=sug-cur;
+    if(Math.abs(d)<0.005)return;
+    n++;
+    const[dc,kind,key]=i.dataset.k.split("|");
+    const nm=kind==="CUSTOMER"?((MODEL.customers.find(c=>String(c.id)===key)||{}).name||key):key;
+    t+=`<tr><td>${dc} · ${esc(nm)}</td><td>${(cur*100).toFixed(1)}%</td><td>${(sug*100).toFixed(1)}%</td>
+      <td class="${d>0?"fav":"unf"}">${d>0?"▲":"▼"} ${(Math.abs(d)*100).toFixed(1)} pts ${d>0?"higher":"lower"} in actuals</td></tr>`;});
+  t+=`</table>`;
+  // auto-apply into the cells (one click) — the drift panel below is the review/audit trail
+  let applied=0;
+  document.querySelectorAll("input.cell").forEach(i=>{
+    const s=map[i.dataset.k];
+    if(s!=null){i.value=(s*100).toFixed(2);applied++;}});
+  $("sg_panel").style.display="block";
+  let cb=SUGGEST.customer_basis?` Customer split: ${esc(SUGGEST.customer_basis)}.`:"";
+  $("sg_basis").innerHTML="Basis (channel): "+esc(SUGGEST.basis)+"."+cb+` Filled <b>${applied}</b> cells from actuals (${n} differ from what was there). Review below, then <b>Save all %</b>.`;
+  $("sg_tbl").innerHTML=t;
+  $("sg_apply").style.display="inline-block";
+  toast(`Suggested + filled ${applied} cells — review, then Save all %`);
+}
+function applySuggest(){
+  if(!SUGGEST)return;
+  let n=0;
+  document.querySelectorAll("input.cell").forEach(i=>{
+    const s=SUGGEST._map[i.dataset.k];
+    if(s!=null){i.value=(s*100).toFixed(2);n++;}});
+  toast(`Applied ${n} suggestions — review, then Save all %`);
+}
+async function savePen(){
+  const rows=[...document.querySelectorAll("input.cell")].map(i=>{
+    const[dc,kind,key]=i.dataset.k.split("|");
+    return{dc_code:dc,target_kind:kind,target_key:key,pct:(+i.value||0)/100};});
+  await api("/penetration",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({version_id:VID,rows})});
+  toast("Penetration saved ✓");await refreshModel();
+}
+
+// ---------- rates & dummies ----------
+function vRates(){
+  const nm=needModel(); if(nm) return `<h1>Rates &amp; dummies</h1>${nm}`;
+  const R={};(MODEL._rates||[]).forEach(r=>R[r.dc_code+"|"+r.kind]=r.pct);
+  const D={};(MODEL._dummy||[]).forEach(d=>D[d.period_id]=d.units);
+  const rc=(dc,k)=>`<td><input class="cell" data-r="${dc}|${k}" value="${((R[dc+"|"+k]??0)*100).toFixed(2)}"></td>`;
+  let t=`<tr><th>DC</th><th>Accessories % of gross</th><th>Returns % of gross</th></tr>
+  <tr><td>Atlanta</td>${rc("ATL","ACC")}${rc("ATL","RET")}</tr>
+  <tr><td>Mexico</td>${rc("MX","ACC")}${rc("MX","RET")}</tr>`;
+  let dt=`<tr><th>Week</th><th>Atlanta dummies (plan)</th></tr>`;
+  MODEL.periods.forEach(p=>{
+    dt+=`<tr><td>${esc(p.label)}</td><td><input class="cell" data-d="${p.id}" value="${Math.round(D[p.id]??0)}"></td></tr>`;});
+  return `<h1>Rates &amp; dummies</h1>
+  <div class="sub">Rates apply to forecast weeks only — actualized weeks use real accessories and returns. Dummies: run-rate plus supply-chain bulk drops in the known week.</div>
+  <div class="grid2">
+    <div class="card"><h2>Derived rates</h2>
+      <div class="row" style="margin-bottom:8px"><button class="btn sec" onclick="suggestRates()">Suggest from history</button></div>
+      <div class="twrap" style="max-height:none"><table>${t}</table></div>
+      <div class="note" style="margin-top:8px">QTD actual: ATL acc ${pct(qtdRate("ATL","acc"))} / ret ${pct(qtdRate("ATL","ret"))} · MX acc ${pct(qtdRate("MX","acc"))} — retune if drifting.</div>
+      <div id="rate_basis" class="note" style="margin-top:4px"></div>
+      <button class="btn" style="margin-top:10px" onclick="saveRates()">Save rates</button></div>
+    <div class="card"><h2>Dummy plan (Atlanta)</h2>
+      <div class="row" style="margin-bottom:8px;align-items:center"><button class="btn sec" onclick="suggestDummies()">Suggest run-rate</button>
+        <span id="dum_basis" class="note"></span></div>
+      <div class="twrap" style="max-height:420px"><table>${dt}</table></div>
+      <button class="btn" style="margin-top:10px" onclick="saveDummies()">Save dummy plan</button></div>
+  </div>`;
+}
+function qtdRate(dc,k){
+  const s=MODEL.summary[dc];if(!s)return null;
+  const g=s.qtd.gross||0;return g?(s.qtd[k]||0)/(g+(s.qtd.acc||0)+(s.qtd.ret||0)):null;
+}
+async function saveRates(){
+  const rows=[...document.querySelectorAll("input[data-r]")].map(i=>{
+    const[dc,k]=i.dataset.r.split("|");return{dc_code:dc,kind:k,pct:(+i.value||0)/100};});
+  await api("/rates",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({version_id:VID,rows})});
+  toast("Rates saved ✓");await refreshModel();
+}
+async function saveDummies(){
+  const rows=[...document.querySelectorAll("input[data-d]")].map(i=>({period_id:+i.dataset.d,dc_code:"ATL",units:+i.value||0}));
+  await api("/dummy_plan",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({version_id:VID,rows})});
+  toast("Dummy plan saved ✓");await refreshModel();
+}
+async function suggestRates(){
+  const s=await api("/rates/suggest?version_id="+VID+"&months=6");
+  const map={};s.suggestions.forEach(x=>map[x.dc_code+"|"+x.kind]=x.pct);
+  document.querySelectorAll("input[data-r]").forEach(i=>{
+    if(map[i.dataset.r]!=null)i.value=(map[i.dataset.r]*100).toFixed(2);});
+  const b=$("rate_basis"); if(b)b.textContent="Suggested — basis: "+s.basis+". Review, then Save.";
+  toast("Rates suggested — review then Save");
+}
+async function suggestDummies(){
+  const s=await api("/dummy_plan/suggest?version_id="+VID);
+  const rr=(s.run_rate&&s.run_rate.ATL)||0;
+  document.querySelectorAll("input[data-d]").forEach(i=>{ i.value=Math.round(rr); });
+  const b=$("dum_basis"); if(b)b.textContent="~"+fmt(rr)+"/wk ("+s.basis+")";
+  toast("Dummy run-rate applied to all weeks — add bulk drops manually, then Save");
+}
+
+// ---------- validation ----------
+function vValid(){
+  if(!VID)return `<h1>Validation</h1><div class="card">Select a version.</div>`;
+  return `<h1>Validation</h1>
+  <div class="sub">Trust, then verify — three layers: automatic source tie-outs, a parallel-run diff against the legacy workbook, and the import log. All navy ▲ pass / amber ▼ needs a look, with the numbers shown so you can eyeball.</div>
+  <div class="card"><h2>A · Automatic tie-outs — app vs imported source files</h2>
+    <button class="btn sec" onclick="runTieout()">Run checks</button>
+    <div id="vt_out" style="margin-top:10px"></div></div>
+  <div class="card"><h2>B · Parallel-run diff — legacy workbook vs the app</h2>
+    <p class="note">Upload the built legacy file (Atlanta Mexico Q3… or Direct Q3…). Week-by-week file vs app side by side. Tolerance is % — differences inside it pass.</p>
+    <div class="row" style="align-items:center;margin-top:6px">
+      <input type="file" id="vl_file" accept=".xlsx">
+      <label class="note">Tolerance %</label><input class="inline-input" id="vl_tol" value="2" style="width:60px">
+      <button class="btn" onclick="runLegacy()">Compare</button>
+      <button class="btn sec" onclick="exportLegacy()">Export diff to Excel</button></div>
+    <div id="vl_out" style="margin-top:10px"></div></div>
+  <div class="card"><h2>C · Import log</h2><div id="vlog"><span class="spin"></span></div></div>`;
+}
+async function runTieout(){
+  $("vt_out").innerHTML=`<span class="spin"></span>`;
+  try{
+    const r=await api("/validate/tieout?version_id="+VID);
+    const s=r.summary;
+    let t=`<div style="margin-bottom:8px"><span class="badge">▲ ${s.passed} pass</span> <span class="badge amb">▼ ${s.failed} check</span>
+      <span class="badge">actualized: ${s.actualized_weeks.join(", ")||"none"}</span></div>
+    <div class="twrap" style="max-height:420px"><table><tr><th>Check</th><th>App</th><th>Source file</th><th>Δ</th><th>Status</th><th>Note</th></tr>`;
+    r.checks.forEach(c=>{
+      t+=`<tr><td>${esc(c.name)}</td><td>${fmt(c.app)}</td><td>${fmt(c.file)}</td>
+        <td>${c.delta==null?"—":fmt(c.delta)}</td>
+        <td>${c.ok?'<span class="fav">▲ ties</span>':'<span class="unf">▼ off</span>'}</td>
+        <td class="note" style="text-align:left">${esc(c.note||"")}</td></tr>`;});
+    t+=`</table></div>`;
+    if(s.direct_recon&&s.direct_recon.residual_total!=null)
+      t+=`<p class="note" style="margin-top:8px">Direct recon: named ${fmt(s.direct_recon.named_total)} + Other ${fmt(s.direct_recon.other_total)} = residual ${fmt(s.direct_recon.residual_total)}.</p>`;
+    $("vt_out").innerHTML=t;
+  }catch(e){$("vt_out").innerHTML=`<span class="unf">▼ ${esc(e.message)}</span>`;}
+}
+async function runLegacy(){
+  const f=$("vl_file").files[0];
+  if(!f){toast("Choose the legacy workbook first");return;}
+  $("vl_out").innerHTML=`<span class="spin"></span> Comparing…`;
+  const fd=new FormData();fd.append("file",f);fd.append("version_id",VID);fd.append("tolerance_pct",$("vl_tol").value||"2");
+  try{
+    const r=await api("/validate/legacy",{method:"POST",body:fd});
+    let t=`<div style="margin-bottom:8px"><span class="badge">▲ ${r.passed} within ${r.tolerance_pct}%</span> <span class="badge amb">▼ ${r.failed} outside</span></div>
+    <div class="twrap" style="max-height:380px"><table><tr><th>Scope</th><th>Week</th><th>File</th><th>App</th><th>Δ</th><th>Δ%</th><th>Status</th></tr>`;
+    r.rows.forEach((d,idx)=>{
+      const hasCh=d.channels&&d.channels.length;
+      t+=`<tr class="${d.actual?"actual":""}">
+        <td>${hasCh?`<span style="cursor:pointer;color:var(--navy)" onclick="toggleDiffRow(${idx})">▸ </span>`:""}${esc(d.scope)}</td>
+        <td>${esc(d.week)}</td><td>${fmt(d.file)}</td><td>${fmt(d.app)}</td><td>${fmt(d.delta)}</td><td>${d.pct}%</td>
+        <td>${d.ok?'<span class="fav">▲ ties</span>':'<span class="unf">▼ eyeball</span>'}</td></tr>`;
+      if(hasCh){
+        t+=`<tr id="diffch_${idx}" style="display:none"><td colspan="7" style="padding:0">
+          <table style="width:100%;margin:0"><tr><th>Channel</th><th>File</th><th>App</th><th>Δ</th></tr>`;
+        d.channels.forEach(c=>{ if(Math.abs(c.delta)<1)return;
+          t+=`<tr><td style="padding-left:24px">${esc(c.channel)}</td><td>${fmt(c.file)}</td><td>${fmt(c.app)}</td>
+            <td class="${c.delta<0?"unf":"fav"}">${c.delta<0?"▼":"▲"} ${fmt(Math.abs(c.delta))}</td></tr>`;});
+        t+=`</table></td></tr>`;
+      }});
+    t+=`</table></div>`;
+    if(r.channel_diffs&&r.channel_diffs.length){
+      t+=`<h2 style="margin-top:12px;font-size:13px;color:var(--navy)">Largest channel-level differences</h2>
+      <div class="twrap" style="max-height:240px"><table><tr><th>Scope</th><th>Week</th><th>Channel</th><th>File</th><th>App</th><th>Δ</th></tr>`;
+      r.channel_diffs.forEach(d=>{
+        t+=`<tr><td>${esc(d.scope)}</td><td>${esc(d.week)}</td><td>${esc(d.channel)}</td>
+          <td>${fmt(d.file)}</td><td>${fmt(d.app)}</td><td class="${d.delta<0?"unf":"fav"}">${d.delta<0?"▼":"▲"} ${fmt(Math.abs(d.delta))}</td></tr>`;});
+      t+=`</table></div>
+      <p class="note" style="margin-top:6px">A steady channel gap on forecast weeks = her manual cell tweak — reproduce it as an override with a reason, and the diff goes quiet.</p>`;}
+    $("vl_out").innerHTML=t;
+  }catch(e){$("vl_out").innerHTML=`<span class="unf">▼ ${esc(e.message)}</span>`;}
+}
+function toggleDiffRow(idx){
+  const r=document.getElementById("diffch_"+idx); if(r) r.style.display=r.style.display==="none"?"":"none";
+}
+function exportLegacy(){
+  const f=$("vl_file").files[0];
+  if(!f){toast("Choose the legacy workbook first");return;}
+  const fd=new FormData();fd.append("file",f);fd.append("version_id",VID);fd.append("tolerance_pct",$("vl_tol").value||"2");
+  fetch(API+"/validate/legacy_export",{method:"POST",headers:AUTH.token?{"Authorization":"Bearer "+AUTH.token}:{},body:fd})
+    .then(r=>r.blob()).then(b=>{const u=URL.createObjectURL(b);const a=document.createElement("a");
+      a.href=u;a.download="Validation_diff.xlsx";a.click();URL.revokeObjectURL(u);toast("Diff exported ✓");})
+    .catch(e=>toast("▼ "+e.message));
+}
+async function loadImportLog(){
+  try{
+    const rows=await api("/import/log");
+    $("vlog").innerHTML=`<div class="twrap" style="max-height:220px"><table><tr><th>When</th><th>Kind</th><th>File</th><th>Rows</th></tr>
+    ${rows.map(l=>`<tr><td>${esc((l.created_at||"").slice(0,16).replace("T"," "))}</td><td>${esc(l.kind)}</td><td style="text-align:left">${esc(l.filename)}</td><td>${fmt(l.rows)}</td></tr>`).join("")}
+    </table></div>`;
+  }catch(e){$("vlog").textContent="n/a";}
+}
+
+// ---------- versions ----------
+function vVersions(){
+  const rows=BOOT.versions.map(v=>{
+    const c=BOOT.cycles.find(c=>c.id===v.cycle_id)||{};
+    return `<tr><td>${v.id}</td><td>${esc(c.label||"")}</td><td>${esc(v.week_tag)}</td><td>${esc(v.kind)}</td>
+      <td>${v.published?'<span class="fav">▲ published</span>':'<span class="note">draft</span>'}</td>
+      <td><button class="btn sm sec" onclick="pickVersion(${v.id})">Open</button>
+      ${v.published?"":`<button class="btn sm" onclick="publishV(${v.id})">Publish</button>`}
+      <button class="btn sm warn" onclick="deleteWeek(${v.id},'${esc(v.week_tag).replace(/'/g,"\\'")}')">Delete</button></td></tr>`;}).join("");
+  const opts=BOOT.versions.map(v=>`<option value="${v.id}">${v.id} · ${esc(v.week_tag)}</option>`).join("");
+  return `<h1>Versions &amp; vs LW</h1>
+  <div class="sub">Every Monday is a new version — never overwrite. Publish freezes the week; vs-LW compares any two versions with no fragile file links.</div>
+  <div class="card"><h2>New week</h2>
+    <div class="row" style="align-items:center">
+      <input class="inline-input" id="nv_year" value="2026" style="width:80px"> 
+      <select class="inline-input" id="nv_q"><option value="3">Q3</option><option value="1">Q1</option><option value="2">Q2</option><option value="4">Q4</option></select>
+      <input class="inline-input" id="nv_tag" placeholder="WK29" style="width:100px">
+      <select class="inline-input" id="nv_copy"><option value="">copy nothing</option>${opts}</select>
+      <button class="btn" onclick="createV()">Create version</button>
+    </div>
+    <p class="note" style="margin-top:6px">Copy-from carries penetration %, rates, dummy plan, and both forecast sets into the new week — then re-import the fresh NA file over the top.</p></div>
+  <div class="card"><h2>All versions</h2><div class="twrap" style="max-height:300px">
+    <table><tr><th>ID</th><th>Cycle</th><th>Week</th><th>Kind</th><th>Status</th><th></th></tr>${rows}</table></div></div>
+  <div class="card"><h2>Monday note (email-ready)</h2>
+    <div class="row" style="align-items:center;margin-bottom:8px">
+      <select class="inline-input" id="mn_prev"><option value="">no compare</option>${opts}</select>
+      <button class="btn sec" onclick="loadNote()">Draft note</button>
+      <button class="btn sm sec" id="mn_copy" style="display:none" onclick="copyNote()">Copy</button></div>
+    <pre id="mn_out" class="pv" style="display:none;max-height:220px"></pre></div>
+  <div class="card"><h2>Danger zone — delete a whole cycle</h2>
+    <p class="note">Each week is a full, independent snapshot — every file you import (actuals, customers, NA, accessories, dummies, penetration) is stored against that week only. Deleting a <b>week</b> removes everything for that week and nothing else. Deleting a whole <b>cycle</b> removes every week in that quarter at once.</p>
+    <div class="row" style="align-items:center">
+      <select class="inline-input" id="del_cycle">${BOOT.cycles.map(c=>`<option value="${c.id}">${esc(c.label)}</option>`).join("")}</select>
+      <button class="btn warn" onclick="deleteCycle()">Delete entire cycle…</button>
+    </div></div>
+  <div class="card"><h2>Gross vs LW</h2>
+    <div class="row" style="align-items:center;margin-bottom:10px">
+      <select class="inline-input" id="vs_a">${opts}</select> vs
+      <select class="inline-input" id="vs_b">${opts}</select>
+      <button class="btn sec" onclick="loadVs()">Compare</button></div>
+    <div id="vs_out" class="note">Pick two versions.</div></div>`;
+}
+async function loadNote(){
+  const prev=$("mn_prev").value;
+  const r=await api(`/monday_note?version_id=${VID}`+(prev?`&prev_version_id=${prev}`:""));
+  const o=$("mn_out");o.style.display="block";o.textContent=r.text;$("mn_copy").style.display="inline-block";
+}
+function copyNote(){navigator.clipboard.writeText($("mn_out").textContent).then(()=>toast("Copied ✓"));}
+async function createV(){
+  const body={year:+$("nv_year").value,quarter:+$("nv_q").value,week_tag:$("nv_tag").value||"WK?",
+    copy_from:$("nv_copy").value?+$("nv_copy").value:null};
+  const v=await api("/version/create",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+  toast("Version "+v.id+" created ✓");await reloadBoot();pickVersion(v.id);
+}
+async function deleteWeek(id,tag){
+  const ans=prompt(`Delete week "${tag}" (version ${id})?\n\nThis permanently removes EVERYTHING imported for this week — actuals, customers, NA forecast, accessories, dummies, penetration and overrides. Other weeks are untouched.\n\nType the week tag (${tag}) to confirm:`);
+  if(ans==null) return;
+  if(ans.trim()!==tag){toast("▼ Name didn't match — nothing deleted");return;}
+  try{
+    await api(`/version/${id}`,{method:"DELETE"});
+    toast(`Week ${tag} deleted`);
+    if(VID===id){VID=null;store.del("ops_vid");}
+    await reloadBoot();
+    if(!VID&&BOOT.versions.length){pickVersion(BOOT.versions[0].id);} else show("versions");
+  }catch(e){toast("▼ "+e.message);}
+}
+async function deleteCycle(){
+  const sel=$("del_cycle");const cid=+sel.value;const label=sel.options[sel.selectedIndex].text;
+  const ans=prompt(`Delete the ENTIRE cycle "${label}"?\n\nThis permanently wipes EVERY week in it AND all shared uploads (actuals, accessories, dummies) for that quarter. This cannot be undone.\n\nType the cycle label (${label}) to confirm:`);
+  if(ans==null) return;
+  if(ans.trim()!==label){toast("▼ Label didn't match — nothing deleted");return;}
+  try{
+    await api(`/cycle/${cid}`,{method:"DELETE"});
+    toast(`Cycle ${label} deleted`);
+    VID=null;store.del("ops_vid");
+    await reloadBoot();
+    if(BOOT.versions.length){pickVersion(BOOT.versions[0].id);} else show("versions");
+  }catch(e){toast("▼ "+e.message);}
+}
+async function publishV(id){await api(`/version/${id}/publish`,{method:"POST"});toast("Published ✓");await reloadBoot();show("versions");}
+async function loadVs(){
+  const a=$("vs_a"),b=$("vs_b");if(!a||!b||BOOT.versions.length<1)return;
+  if(a.value===b.value&&BOOT.versions.length>1)b.selectedIndex=1;
+  if(a.value===b.value){$("vs_out").textContent="Only one version yet — create next week's to compare.";return;}
+  $("vs_out").innerHTML=`<span class="spin"></span>`;
+  try{
+    const r=await api(`/model/vs?version_id=${a.value}&prev_version_id=${b.value}`);
+    let t=`<table><tr><th>DC</th><th>Δ gross</th><th>Read</th></tr>`;
+    for(const dc of["ATL","MX","DIRECT"]){
+      const d=r.totals[dc]?.gross||0;
+      t+=`<tr><td>${dc}</td><td class="${d<0?"unf":"fav"}">${d<0?"▼":"▲"} ${fmt(Math.abs(d))}</td>
+        <td class="note">${d<0?"down vs compare (unfavorable)":"up or flat vs compare (favorable)"}</td></tr>`;}
+    t+=`</table>`;
+    if(r.decomposition){
+      t+=`<h2 style="margin-top:14px;font-size:13px;color:var(--navy)">Why it moved (forecast weeks)</h2>
+      <table><tr><th>DC</th><th>NA forecast change</th><th>Penetration % change</th><th>Overrides &amp; actualization</th><th>Total Δ</th></tr>`;
+      for(const dc of["ATL","MX"]){const d=r.decomposition[dc];
+        const f=v2=>`<td class="${v2<0?"unf":"fav"}">${v2<0?"▼":"▲"} ${fmt(Math.abs(v2))}</td>`;
+        t+=`<tr><td>${dc}</td>${f(d.na_change)}${f(d.pct_change)}${f(d.overrides_and_actualization)}${f(d.total)}</tr>`;}
+      t+=`</table>`;}
+    t+=`<div class="note" style="margin:10px 0 4px">Per-week Δ (Atlanta): ${r.per_period.ATL.map(x=>`${esc(x.label)}: ${x.delta<0?"▼":"▲"}${fmt(Math.abs(x.delta))}`).join(" · ")}</div>`;
+    $("vs_out").innerHTML=t;
+  }catch(e){$("vs_out").textContent="▼ "+e.message;}
+}
+
+// ---------- export ----------
+function vExport(){
+  if(!VID)return `<h1>Export</h1><div class="card">Select a version.</div>`;
+  return `<h1>Export for DCs</h1>
+  <div class="sub">DC-familiar workbooks — same layout the DCs already read, so nothing changes on their side if they can't log in.</div>
+  <div class="row">
+    <div class="card" style="flex:1"><h2>Atlanta · Mexico · Direct</h2>
+      <p class="note">Channel grids with gray actualized weeks, orange overrides, accessories, returns add-back, dummies, RW/Nuance/OW, monthly + QTD/to-go.</p>
+      <a class="btn" style="display:inline-block;text-decoration:none;margin-top:8px" href="${API}/export/dc?version_id=${VID}&which=atl_mx">Download workbook</a></div>
+    <div class="card" style="flex:1"><h2>Direct — Italy · China · Thailand</h2>
+      <p class="note">Customer grids per country plus total, negative cells preserved for visibility.</p>
+      <a class="btn" style="display:inline-block;text-decoration:none;margin-top:8px" href="${API}/export/dc?version_id=${VID}&which=direct">Download workbook</a></div>
+  </div>`;
+}
+
+// ---------- admin ----------
+function vAdmin(){
+  const custRows=BOOT.customers.map(c=>`<tr><td>${esc(c.name)}</td>
+    <td>${c.active?'<span class="fav">▲ active</span>':'<span class="unf">▼ inactive</span>'}</td>
+    <td><button class="btn sm sec" onclick="toggleCust(${c.id},${!c.active})">${c.active?"Deactivate":"Activate"}</button></td></tr>`).join("");
+  const pa=BOOT.plant_aliases.map(a=>`<tr><td>${esc(a.prefix)}</td><td>${esc(a.dc_code)}</td></tr>`).join("");
+  const ca=BOOT.cot_aliases.map(a=>`<tr><td>${esc(a.cot)}</td><td>${esc(a.channel_code)}</td></tr>`).join("");
+  return `<h1>Admin</h1>
+  <div class="sub">Back-end wiring lives here so the daily screens stay simple. Changes apply to future imports.</div>
+  <div class="grid2">
+  <div class="card"><h2>Customers <span class="badge">${BOOT.customers.length}</span></h2>
+    <div class="row" style="margin-bottom:8px"><input class="inline-input" id="nc_name" placeholder="New customer name" style="flex:1">
+    <button class="btn sm" onclick="addCust()">Add</button></div>
+    <div class="twrap" style="max-height:320px"><table><tr><th>Name</th><th>Status</th><th></th></tr>${custRows}</table></div>
+    <p class="note" style="margin-top:6px">Importers auto-add unknown customers and flag them — this list is the master.</p></div>
+  <div class="card"><h2>Plant → DC map</h2>
+    <div class="twrap" style="max-height:180px"><table><tr><th>Plant prefix</th><th>DC</th></tr>${pa}</table></div>
+    <div class="row" style="margin-top:8px"><input class="inline-input" id="np_pfx" placeholder="prefix e.g. TH" style="width:110px">
+      <select class="inline-input" id="np_dc">${BOOT.dcs.map(d=>`<option>${d.code}</option>`).join("")}</select>
+      <button class="btn sm" onclick="addPlant()">Add / update</button></div>
+    <p class="note" style="margin-top:6px">Longest prefix wins — TH04 matches TH.</p></div>
+  <div class="card"><h2>COT → channel map</h2>
+    <div class="twrap" style="max-height:260px"><table><tr><th>COT (as in BO)</th><th>Channel</th></tr>${ca}</table></div>
+    <div class="row" style="margin-top:8px"><input class="inline-input" id="na_cot" placeholder="COT value" style="width:170px">
+      <select class="inline-input" id="na_ch">${BOOT.channels.map(c=>`<option>${c.code}</option>`).join("")}</select>
+      <button class="btn sm" onclick="addCot()">Add / update</button></div></div>
+  <div class="card"><h2>NA file column map</h2>
+    <p class="note">If the NA layout shifts, fix it here — no code change. Excel ranges per channel.</p>
+    <textarea id="na_map" rows="10" style="width:100%;font-family:monospace;font-size:12px;border:1px solid var(--line-2);border-radius:8px;padding:8px">${esc(JSON.stringify(BOOT.na_map,null,1))}</textarea>
+    <button class="btn sm" style="margin-top:8px" onclick="saveNaMap()">Save map</button></div>
+  </div>
+  ${AUTH.role==="admin"?`<div class="card" style="margin-top:0"><h2>Data cleanup <span class="badge">admin</span></h2>
+    <p class="note">Customers whose names look like country/total headers (e.g. a total column mistakenly imported as a customer, like "Italy").</p>
+    <div id="strayList"><span class="spin"></span></div></div>`:""}
+  <div class="card" style="margin-top:0"><h2>Working days per week (capacity math)</h2>
+    <p class="note">Default 5. Set 4 for holiday weeks, etc. Applies to units/day on the Capacity screen.</p>
+    <div class="twrap" style="max-height:220px"><table><tr><th>Week</th><th>Working days</th><th></th></tr>
+    ${(MODEL?MODEL.periods:[]).map(p=>`<tr><td>${esc(p.label)}</td>
+      <td><input class="cell" id="wd_${p.id}" value="${p.working_days||5}" style="width:50px"></td>
+      <td><button class="btn sm sec" onclick="saveWd(${p.id})">Save</button></td></tr>`).join("")}
+    </table></div></div>
+  ${AUTH.role==="admin"?`<div class="card"><h2>Users &amp; access <span class="badge">admin</span></h2>
+    <div class="row" style="margin-bottom:8px"><input class="inline-input" id="nu_name" placeholder="new username" style="width:150px">
+      <select class="inline-input" id="nu_role"><option value="planner">planner</option><option value="viewer">viewer</option><option value="admin">admin</option></select>
+      <button class="btn sm" onclick="addUser()">Add user</button></div>
+    <div id="userList" class="note"><span class="spin"></span></div>
+    <p class="note" style="margin-top:6px">New users get a temp password and must change it on first login.</p></div>`:""}
+  <div class="card"><h2>App</h2><p class="note">Frontend v${APP_VERSION} · build ${FRONT_BUILD} · backend ${esc(BOOT.app.version)} (${esc(BOOT.app.db_mode)}) · API base <code>${esc(API||"same origin")}</code></p></div>`;
+}
+async function loadStrays(){
+  const el=$("strayList"); if(!el)return;
+  try{
+    const r=await api("/admin/stray_customers");
+    if(!r.strays.length){el.innerHTML='<span class="fav">▲ No stray customers found.</span>';return;}
+    el.innerHTML=`<div class="warnbox" style="margin-bottom:8px">▼ ${r.strays.length} suspicious customer(s): ${r.strays.map(s=>esc(s.name)).join(", ")}</div>`
+      +r.strays.map(s=>`<div style="margin:4px 0">"${esc(s.name)}" <button class="btn sm" onclick="removeStray('${esc(s.name).replace(/'/g,"")}')">Remove</button></div>`).join("");
+  }catch(e){el.textContent="▼ "+e.message;}
+}
+async function removeStray(name){
+  if(!confirm(`Remove customer "${name}"? It will be deactivated (not deleted) and disappear from the grids.`))return;
+  try{
+    const r=await api("/admin/remove_customer",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:name})});
+    toast(`Removed ${r.removed.join(", ")||"nothing"} ✓`);
+    await reloadBoot();await refreshModel();loadStrays();
+  }catch(e){toast("▼ "+e.message);}
+}
+async function loadUsers(){
+  const el=$("userList"); if(!el)return;
+  try{
+    const us=await api("/auth/users");
+    el.innerHTML=`<div class="twrap" style="max-height:240px"><table><tr><th>User</th><th>Role</th><th>Status</th><th>Last login</th><th></th></tr>
+    ${us.map(u=>`<tr><td style="text-align:left">${esc(u.username)}</td><td>${esc(u.role)}</td>
+      <td>${u.active?'<span class="fav">▲ active</span>':'<span class="unf">▼ off</span>'}${u.must_change?' <span class="note">(pw reset)</span>':""}</td>
+      <td>${esc((u.last_login||"—").slice(0,10))}</td>
+      <td><button class="btn sm sec" onclick="resetUser(${u.id})">Reset pw</button></td></tr>`).join("")}
+    </table></div>`;
+  }catch(e){el.textContent="▼ "+e.message;}
+}
+async function addUser(){
+  const n=$("nu_name").value.trim(); if(!n)return;
+  try{
+    const r=await api("/auth/users",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({username:n,role:$("nu_role").value})});
+    alert("User created.\nUsername: "+r.username+"\nTemp password: "+r.temp_password+"\n\nThey must change it on first login.");
+    loadUsers();
+  }catch(e){toast("▼ "+e.message);}
+}
+async function resetUser(id){
+  if(!confirm("Reset this user's password?"))return;
+  const r=await api("/auth/users/"+id+"/reset",{method:"POST"});
+  alert("New temp password: "+r.temp_password+"\nThey must change it on next login.");
+  loadUsers();
+}
+async function saveWd(pid){
+  await api("/admin/period/"+pid,{method:"PATCH",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({working_days:+$("wd_"+pid).value||5})});
+  toast("Saved ✓");await refreshModel();
+}
+async function addCust(){
+  const n=$("nc_name").value.trim();if(!n)return;
+  await api("/admin/customer",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:n})});
+  toast("Customer added ✓");await reloadBoot();await refreshModel();show("admin");
+}
+async function toggleCust(id,active){
+  await api("/admin/customer/"+id,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({active})});
+  await reloadBoot();await refreshModel();show("admin");
+}
+async function addPlant(){
+  await api("/admin/plant_alias",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({prefix:$("np_pfx").value.trim(),dc_code:$("np_dc").value})});
+  toast("Saved ✓");await reloadBoot();show("admin");
+}
+async function addCot(){
+  await api("/admin/cot_alias",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({cot:$("na_cot").value.trim(),channel_code:$("na_ch").value})});
+  toast("Saved ✓");await reloadBoot();show("admin");
+}
+async function saveNaMap(){
+  try{const j=JSON.parse($("na_map").value);
+    await api("/admin/na_map",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(j)});
+    toast("NA map saved ✓");await reloadBoot();
+  }catch(e){toast("▼ Invalid JSON: "+e.message);}
+}
+
+// pen/rates need their data loaded when opening those views
+let DRILLDATA=null;
+let DRILLPATH=["dc","country","product","month","channel"];  // DC expands to Country then Product
+let DRILLEXPAND={};   // key -> bool
+async function loadDrill(){
+  try{ DRILLDATA=await api("/drilldown?version_id="+VID); renderDrill(); }
+  catch(e){ const el=$("drill"); if(el)el.textContent="n/a"; }
+}
+function moveDim(i,dir){
+  const j=i+dir; if(j<0||j>=DRILLPATH.length)return;
+  const t=DRILLPATH[i];DRILLPATH[i]=DRILLPATH[j];DRILLPATH[j]=t;
+  DRILLEXPAND={}; renderDrill();
+}
+function renderDrillPath(){
+  const el=$("drillPath"); if(!el||!DRILLDATA)return;
+  const lbl=DRILLDATA.dim_labels;
+  el.innerHTML=DRILLPATH.map((d,i)=>`<span class="dchip">${i+1} ${esc(lbl[d]||d)}
+    <button ${i===0?"disabled":""} onclick="moveDim(${i},-1)">◀</button>
+    <button ${i===DRILLPATH.length-1?"disabled":""} onclick="moveDim(${i},1)">▶</button></span>`).join('<span class="darr">→</span>');
+}
+function aggregate(facts, dims){
+  const level=dims[0];
+  const groups={};
+  facts.forEach(f=>{
+    const k=f[level];
+    (groups[k]=groups[k]||{td:0,tg:0,rows:[]});
+    groups[k].td+=f.td; groups[k].tg+=f.tg; groups[k].rows.push(f);
+  });
+  return groups;
+}
+function renderNode(facts, dims, depth, pathkey, out){
+  if(!dims.length) return;
+  const groups=aggregate(facts, dims);
+  const keys=Object.keys(groups).sort(function(a,b){return (groups[b].td+groups[b].tg)-(groups[a].td+groups[a].tg);});
+  keys.forEach(function(k){
+    const g=groups[k]; const key=pathkey+"|"+k;
+    const td=g.td, tg=g.tg, total=td+tg;
+    const canExpand=dims.length>1;
+    const open=!!DRILLEXPAND[key];
+    const arrow=canExpand?('<span class="exp" data-k="'+encodeURIComponent(key)+'">'+(open?"▾":"▸")+'</span> '):"";
+    out.push('<tr class="lvl'+depth+'"><td style="padding-left:'+(8+depth*18)+'px">'+arrow+esc(k)+'</td>'
+      +'<td>'+fmt(td)+'</td><td>'+fmt(tg)+'</td><td><b>'+fmt(total)+'</b></td></tr>');
+    if(canExpand&&open) renderNode(g.rows, dims.slice(1), depth+1, key, out);
+  });
+}
+function renderDrill(){
+  if(!DRILLDATA)return;
+  renderDrillPath();
+  const el=$("drill"); if(!el)return;
+  let facts=DRILLDATA.facts;
+  const tot=facts.reduce((a,f)=>{a.td+=f.td;a.tg+=f.tg;return a;},{td:0,tg:0});
+  const out=[];
+  renderNode(facts, DRILLPATH, 0, "", out);
+  let t=`<div class="twrap" style="max-height:460px"><table><tr>
+    <th>Level</th><th>To-Date (actual)</th><th>To-Go (forecast)</th><th>Total</th></tr>
+    ${out.join("")}
+    <tr class="total"><td>Total</td><td>${fmt(tot.td)}</td><td>${fmt(tot.tg)}</td><td><b>${fmt(tot.td+tot.tg)}</b></td></tr></table></div>`;
+  el.innerHTML=t;
+  el.querySelectorAll(".exp").forEach(function(sp){
+    sp.style.cursor="pointer";sp.style.color="var(--navy)";
+    sp.addEventListener("click",function(){
+      const key=decodeURIComponent(sp.getAttribute("data-k"));
+      DRILLEXPAND[key]=!DRILLEXPAND[key]; renderDrill();
+    });
+  });
+}
+function loadAccuracy(){
+  api("/accuracy?version_id="+VID).then(a=>{
+    const el=$("acc"); if(!el)return;
+    el.innerHTML=["ATL","MX"].map(d=>{
+      const w=a[d]&&a[d].wape;
+      return '<span class="badge">'+d+' '+(w==null?"n/a":(w*100).toFixed(1)+"% over "+a[d].weeks+" wks")+'</span>';}).join(" ")
+      +' <span class="note">lower is better — weekly WAPE should shrink as the quarter progresses</span>';
+  }).catch(()=>{const el=$("acc");if(el)el.textContent="n/a";});
+}
+const _show=show;
+show=function(v){
+  const r=_show(v);
+  if(v==="dashboard"&&MODEL){loadAccuracy();loadDrill();}
+  if(v==="valid"&&VID){loadImportLog();runTieout();}
+  if(v==="admin"&&AUTH.role==="admin"){loadUsers();loadStrays();}
+  if(v==="pen"&&MODEL&&!MODEL._pen)loadPenIntoModel().then(()=>{if(VIEW==="pen")_show("pen");});
+  if(v==="pen"&&document.getElementById("alias_box"))loadAliases();
+  if(v==="rates"&&MODEL&&(!MODEL._rates||!MODEL._dummy)){
+    Promise.all([api("/rates?version_id="+VID),api("/dummy_plan?version_id="+VID)]).then(([r2,d])=>{
+      MODEL._rates=r2;MODEL._dummy=d;if(VIEW==="rates")_show("rates");});}
+  return r;
+};
+
+boot().catch(function(e){
+  try{
+    var shell=document.getElementById("shell"), gate=document.getElementById("authgate");
+    if(!(shell&&shell.style.display!=="none")&&!gate){
+      var fb=document.getElementById("fatalBox"), fm=document.getElementById("fatalMsg");
+      if(fb){fb.style.display="block"; if(fm) fm.textContent="Startup error: "+(e&&e.message?e.message:e)+". Tap Reload.";}
+    }
+  }catch(_){}
+});
+</script>
+</body>
+</html>
