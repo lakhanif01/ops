@@ -11,8 +11,8 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Query, Body,
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
 
-__version__ = "1.5.6"
-BUILD = "2026-07-21-22"
+__version__ = "1.5.7"
+BUILD = "2026-07-21-23"
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
 SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_KEY") or os.environ.get("SUPABASE_KEY", "")
@@ -253,14 +253,17 @@ def ensure_period(cycle_id, month_no, week_no):
     return DB.insert("period", {"cycle_id": cycle_id, "month_no": month_no, "week_no": week_no,
                                 "label": f"{month_no}-{week_no}", "sort": month_no * 100 + week_no})
 
-def plant_to_dc(plant, aliases):
+def plant_to_dc(plant, aliases, _cache=None):
     if not plant: return None
     p = str(plant).upper()
+    if _cache is not None and p in _cache: return _cache[p]
     best = None
     for a in aliases:
         if p.startswith(a["prefix"]) and (best is None or len(a["prefix"]) > len(best["prefix"])):
             best = a
-    return best["dc_code"] if best else None
+    res = best["dc_code"] if best else None
+    if _cache is not None: _cache[p] = res
+    return res
 
 def load_wb(data):
     import openpyxl
@@ -567,14 +570,22 @@ def parse_all_channels(data, filename, aliases, cot_map, month_filter=None, want
     cust_dim = defaultdict(float)      # (cust_upper, dimkind, dimval) -> units  [ALL dcs, for mix weighting]
     unmapped_cot, unmapped_plant = set(), set()
     nrows = 0
+    _empty_run = 0
+    _dc_cache = {}
     for r in it:
-        if r is None or len(r) <= iInv or r[iY] in (None, ""): continue
+        # BO/Excel exports pad the sheet with ~1M phantom empty rows; stop after a long empty run
+        # so we don't scan the whole padded range (data is contiguous).
+        if r is None or len(r) <= iInv or r[iY] in (None, ""):
+            _empty_run += 1
+            if _empty_run >= 1000: break
+            continue
+        _empty_run = 0
         try: yr, mo, wk = int(r[iY]), int(r[iM]), int(r[iW])
         except Exception: continue
         if month_filter and mo not in month_filter: continue
         units = num(r[iInv])
         if units == 0: continue
-        dc = plant_to_dc(r[iPl], aliases)
+        dc = plant_to_dc(r[iPl], aliases, _dc_cache)
         if not dc:
             unmapped_plant.add(str(r[iPl])); continue
         tk = str(r[iTK] or "").upper()
@@ -744,12 +755,17 @@ async def import_accessories(file: UploadFile = File(...), version_id: int = For
     if None in (iY, iM, iW, iInv, iPl):
         raise HTTPException(400, f"Accessories sheet needs Year/Month/Week/Invoices/Plant columns; got {header}")
     agg = defaultdict(float)
+    _empty = 0; _dc_cache = {}
     for r in it:
-        if r[iY] in (None, ""): continue
+        if r is None or r[iY] in (None, ""):
+            _empty += 1
+            if _empty >= 1000: break
+            continue
+        _empty = 0
         try: mo, wk = int(r[iM]), int(r[iW])
         except Exception: continue
         if mo not in q_months: continue
-        dc = plant_to_dc(r[iPl], aliases)
+        dc = plant_to_dc(r[iPl], aliases, _dc_cache)
         if dc: agg[(mo, wk, dc)] += num(r[iInv])
     preview = {"cells": len(agg), "by_dc": {}, "already_imported": False}
     for (mo, wk, dc), u in agg.items():
@@ -795,12 +811,17 @@ async def import_dummies(file: UploadFile = File(...), version_id: int = Form(..
     iU = find("invoices", "units", "u")
     agg = defaultdict(float)
     it = ws.iter_rows(min_row=2, values_only=True)
+    _empty = 0; _dc_cache = {}
     for r in it:
-        if r[iY] in (None, ""): continue
+        if r is None or r[iY] in (None, ""):
+            _empty += 1
+            if _empty >= 1000: break
+            continue
+        _empty = 0
         try: mo, wk = int(r[iM]), int(r[iW])
         except Exception: continue
         if mo not in q_months: continue
-        dc = plant_to_dc(r[iPl], aliases)
+        dc = plant_to_dc(r[iPl], aliases, _dc_cache)
         if dc: agg[(mo, wk, dc)] += num(r[iU]) if iU is not None else 1
     preview = {"sheet": name, "cells": len(agg),
                "by_dc": {}, "already_imported": False}
