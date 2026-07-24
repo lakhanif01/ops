@@ -11,8 +11,8 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Query, Body,
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
 
-__version__ = "1.5.10"
-BUILD = "2026-07-22-26"
+__version__ = "1.5.11"
+BUILD = "2026-07-22-27"
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
 SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_KEY") or os.environ.get("SUPABASE_KEY", "")
@@ -651,6 +651,49 @@ def health_writecheck(version_id: int, authorization: Optional[str] = Header(Non
             "fix": None if ok else
                    "Run ops_schema.sql (including the v1.5.10 block at the end), then "
                    "ops_grants.sql, then:  NOTIFY pgrst, 'reload schema';"}
+
+@app.get("/version/{vid}/readiness")
+def version_readiness(vid: int):
+    """What this week actually has, and what is still required for the forecast to be non-zero.
+    Each week is an independent snapshot, so every input must be present for THIS week."""
+    v = DB.select("version", {"id": vid})
+    if not v: raise HTTPException(404, "version not found")
+    fc = DB.select("forecast_channel", {"version_id": vid})
+    fcu = DB.select("forecast_customer", {"version_id": vid})
+    acts = DB.select("actual", {"version_id": vid})
+    pen = DB.select("penetration", {"version_id": vid})
+    rates = DB.select("rate", {"version_id": vid})
+    dpl = DB.select("dummy_plan", {"version_id": vid})
+    pen_ch = [p for p in pen if p["target_kind"] == "CHANNEL" and (p.get("pct") or 0) > 0]
+    pen_cu = [p for p in pen if p["target_kind"] == "CUSTOMER" and (p.get("pct") or 0) > 0]
+    dom_pen = [p for p in pen_ch if p["dc_code"] in ("ATL", "MX")]
+    items = [
+        {"key": "na", "label": "NA planner forecast", "ok": len(fc) > 0, "count": len(fc),
+         "why": "Without it every forecast week is 0.", "fix": "Imports → 1 · NA file → Commit"},
+        {"key": "actuals", "label": "Actuals (All Channels)", "ok": any(a["kind"] in ("GROSS", "RETURN") for a in acts),
+         "count": len(acts), "why": "Sets which weeks are actualized and feeds derived penetration.",
+         "fix": "Imports → 2 · Actuals → Commit"},
+        {"key": "pen_channel", "label": "Penetration % SAVED for Atlanta/Mexico", "ok": len(dom_pen) > 0,
+         "count": len(dom_pen),
+         "why": "Forecast week = penetration % x NA forecast. With none saved, Atlanta and Mexico forecast weeks are 0 and everything falls into Direct.",
+         "fix": "Penetration % → Suggest from actuals → then click SAVE ALL %"},
+        {"key": "customers", "label": "Customer forecast (Direct file)", "ok": len(fcu) > 0, "count": len(fcu),
+         "why": "Without it no named customer columns can populate.",
+         "fix": "Imports → 5 · Customer forecast → Commit"},
+        {"key": "pen_customer", "label": "Penetration % SAVED for customers", "ok": len(pen_cu) > 0,
+         "count": len(pen_cu),
+         "why": "Splits each customer across Italy/China/Thailand. With none saved, every customer shows 0 and Other absorbs the lot.",
+         "fix": "Penetration % → Suggest from actuals → then click SAVE ALL %"},
+        {"key": "rates", "label": "Rates (returns/accessories)", "ok": len(rates) > 0, "count": len(rates),
+         "why": "Optional, but returns and accessories forecasts stay 0 without them.",
+         "fix": "Rates & dummies → Save"},
+        {"key": "dummies", "label": "Dummy plan", "ok": len(dpl) > 0, "count": len(dpl),
+         "why": "Optional; dummy units per week.", "fix": "Rates & dummies → Save"},
+    ]
+    blocking = [i for i in items if not i["ok"] and i["key"] in
+                ("na", "pen_channel", "customers", "pen_customer")]
+    return {"version_id": vid, "week_tag": v[0].get("week_tag"), "items": items,
+            "ok": not blocking, "blocking": [i["key"] for i in blocking]}
 
 @app.get("/import/status")
 def import_status(version_id: int, kind: str):

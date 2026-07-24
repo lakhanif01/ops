@@ -211,7 +211,7 @@ window.addEventListener("error",function(ev){
 
 <script>
 "use strict";
-const APP_VERSION="1.5.10", FRONT_BUILD="2026-07-22-26";
+const APP_VERSION="1.5.11", FRONT_BUILD="2026-07-22-27";
 // Safe storage — mobile Safari (Private mode) THROWS on localStorage access, which would
 // halt the whole script and show a blank page. This wrapper degrades to an in-memory map.
 const _mem={};
@@ -253,6 +253,16 @@ async function api(path,opts={}){
 
 // ---------- boot ----------
 let SCHEMA_OK=true, SCHEMA_MISSING=[];
+let READY=null, PEN_DIRTY=false;
+function readinessStrip(keys){
+  if(!READY||READY.ok) return "";
+  const miss=(READY.items||[]).filter(i=>!i.ok&&keys.includes(i.key));
+  if(!miss.length) return "";
+  return `<div class="warnbox" style="margin-bottom:10px">
+    <b>▼ This week is missing something, so these numbers are 0:</b>
+    ${miss.map(i=>`<div style="margin-top:6px">• <b>${esc(i.label)}</b> — ${esc(i.why)}<br>
+      <span class="note">Fix: ${esc(i.fix)}</span></div>`).join("")}</div>`;
+}
 function renderSchemaBanner(){
   let el=document.getElementById("schemaBanner");
   if(SCHEMA_OK){ if(el) el.remove(); return; }
@@ -408,6 +418,7 @@ async function refreshModel(){
     // Plan baseline runs the whole model a second time, so it is fetched lazily — only when the
     // Direct-by-customer view (the only consumer, for its drift banner) is actually opened.
     MODEL._baseline=null; MODEL._baselineTried=false;
+    try{ READY=await api(`/version/${VID}/readiness`); }catch(_){ READY=null; }
   }
   catch(e){MODEL=null;toast("Model: "+e.message);}
   LOADING=false;
@@ -702,6 +713,7 @@ function vGrid(dc){
   <div class="legend"><span><span class="sw" style="background:var(--act)"></span>Actualized (completed week)</span>
     <span><span class="sw" style="background:var(--ovr)"></span>Override</span>
     <span><span class="sw" style="background:var(--neg)"></span>▼ Negative — needs a look</span></div>
+  ${readinessStrip(isDir?["na"]:["na","pen_channel"])}
   <div class="twrap"><table>${h}${rows}${trow}</table></div>`;
 }
 function dcName(dc){return{ATL:"Atlanta",MX:"Mexico",DIRECT:"Direct (residual)"}[dc]||dc;}
@@ -759,6 +771,7 @@ function vCust(){
       Add a customer in Admin whenever a week's Other runs large and steady.</div>`:"";
   return `<h1>Direct by customer</h1>
   <div class="sub">The shaded <b>Total</b> column (first, after Wk·Mo) is everything shipping to that country per week — the sum of all customer columns plus Other. Other = channel residual − named customers, so this view ties to Direct. ▼ flags a week where Other exceeds 15% of residual.</div>
+  ${readinessStrip(["customers","pen_customer","pen_channel"])}
   <div class="row" style="margin-bottom:10px">
     <button class="btn warn" onclick="reallocateNegatives()">▼ Reallocate all negatives to Atlanta</button>
     ${CUSTTAB!=="ALL"?`<button class="btn sec" onclick="openShift()">⇄ Shift units between weeks</button>`:""}
@@ -880,7 +893,7 @@ function vPen(){
   const nm=needModel(); if(nm) return `<h1>Penetration %</h1>${nm}`;
   const chs=MODEL.channels, custs=MODEL.customers;
   const P={}; (MODEL._pen||[]).forEach(p=>P[p.dc_code+"|"+p.target_kind+"|"+p.target_key]=p.pct);
-  const cell=(dc,kind,key)=>`<td><input class="cell" data-k="${dc}|${kind}|${key}" value="${((P[dc+"|"+kind+"|"+key]??0)*100).toFixed(2)}"></td>`;
+  const cell=(dc,kind,key)=>`<td><input class="cell" oninput="markPenDirty(0)" data-k="${dc}|${kind}|${key}" value="${((P[dc+"|"+kind+"|"+key]??0)*100).toFixed(2)}"></td>`;
   let t1=`<tr><th>Channel</th><th>Atlanta %</th><th>Mexico %</th><th>Direct % (residual)</th></tr>`;
   chs.forEach(c=>{
     const a=P["ATL|CHANNEL|"+c.code]??0,m=P["MX|CHANNEL|"+c.code]??0;
@@ -899,7 +912,7 @@ function vPen(){
     <select class="inline-input" id="sg_months"><option value="0" selected>All history (recommended)</option><option value="3">Trailing 3 months</option><option value="6">Trailing 6 months</option><option value="12">Trailing 12 months</option></select>
     <button class="btn sec" onclick="suggestPen()">Suggest from actuals</button>
     <button class="btn sec" id="sg_apply" style="display:none" onclick="applySuggest()">Apply suggestions</button>
-    <button class="btn" onclick="savePen()">Save all %</button></div>
+    <button class="btn" id="savePenBtn" onclick="savePen()">Save all %</button></div>
   <div class="card" id="sg_panel" style="display:none"><h2>Drift — applied % vs trailing actual %</h2>
     <p class="note" id="sg_basis"></p><div class="twrap" style="max-height:300px" id="sg_tbl"></div></div>
   <div class="grid2">
@@ -968,10 +981,11 @@ async function suggestPen(){
     if(s!=null){i.value=(s*100).toFixed(2);applied++;}});
   $("sg_panel").style.display="block";
   let cb=SUGGEST.customer_basis?` Customer split: ${esc(SUGGEST.customer_basis)}.`:"";
-  $("sg_basis").innerHTML="Basis (channel): "+esc(SUGGEST.basis)+"."+cb+` Filled <b>${applied}</b> cells from actuals (${n} differ from what was there). Review below, then <b>Save all %</b>.`;
+  $("sg_basis").innerHTML="Basis (channel): "+esc(SUGGEST.basis)+"."+cb+` Filled <b>${applied}</b> cells from actuals (${n} differ from what was there).`;
   $("sg_tbl").innerHTML=t;
   $("sg_apply").style.display="inline-block";
-  toast(`Suggested + filled ${applied} cells — review, then Save all %`);
+  markPenDirty(applied);
+  toast(`Filled ${applied} cells — NOT SAVED YET. Click "Save all %".`);
 }
 function applySuggest(){
   if(!SUGGEST)return;
@@ -979,7 +993,29 @@ function applySuggest(){
   document.querySelectorAll("input.cell").forEach(i=>{
     const s=SUGGEST._map[i.dataset.k];
     if(s!=null){i.value=(s*100).toFixed(2);n++;}});
-  toast(`Applied ${n} suggestions — review, then Save all %`);
+  markPenDirty(n);
+  toast(`Applied ${n} suggestions — NOT SAVED YET. Click "Save all %".`);
+}
+function markPenDirty(n){
+  PEN_DIRTY=true;
+  let el=document.getElementById("penDirty");
+  if(!el){
+    el=document.createElement("div"); el.id="penDirty"; el.className="warnbox";
+    el.style.cssText="margin:10px 0;font-size:14px";
+    const anchor=document.getElementById("sg_panel");
+    if(anchor&&anchor.parentNode) anchor.parentNode.insertBefore(el,anchor);
+  }
+  el.innerHTML=`<b>▼ NOT SAVED YET.</b> ${n?`${n} cells were filled from actuals, but nothing is stored until you save. `:""}
+    Until you save, Atlanta and Mexico forecast weeks stay 0 and every customer shows 0.
+    <button class="btn" style="margin-left:8px" onclick="savePen()">Save all % now</button>`;
+  const sb=document.getElementById("savePenBtn");
+  if(sb){ sb.style.boxShadow="0 0 0 3px rgba(180,83,9,.35)"; sb.textContent="Save all % (unsaved)"; }
+}
+function clearPenDirty(){
+  PEN_DIRTY=false;
+  const el=document.getElementById("penDirty"); if(el) el.remove();
+  const sb=document.getElementById("savePenBtn");
+  if(sb){ sb.style.boxShadow=""; sb.textContent="Save all %"; }
 }
 async function savePen(){
   const rows=[...document.querySelectorAll("input.cell")].map(i=>{
@@ -987,7 +1023,9 @@ async function savePen(){
     return{dc_code:dc,target_kind:kind,target_key:key,pct:(+i.value||0)/100};});
   await api("/penetration",{method:"POST",headers:{"Content-Type":"application/json"},
     body:JSON.stringify({version_id:VID,rows})});
+  clearPenDirty();
   toast("Penetration saved ✓");await refreshModel();
+  if(VIEW==="pen")_show("pen");
 }
 
 // ---------- rates & dummies ----------
