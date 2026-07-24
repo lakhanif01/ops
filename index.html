@@ -211,7 +211,7 @@ window.addEventListener("error",function(ev){
 
 <script>
 "use strict";
-const APP_VERSION="1.5.9", FRONT_BUILD="2026-07-22-25";
+const APP_VERSION="1.5.10", FRONT_BUILD="2026-07-22-26";
 // Safe storage — mobile Safari (Private mode) THROWS on localStorage access, which would
 // halt the whole script and show a blank page. This wrapper degrades to an in-memory map.
 const _mem={};
@@ -538,6 +538,10 @@ function vImports(){
           <button class="btn sm" onclick="doHistory(true)">Commit all</button></div>
         <div class="pv" id="pv_his"></div></div>
   </div>
+  <div class="card" style="margin-top:16px"><h2>Database check</h2>
+    <p class="note">Runs the exact write the imports use (on a throwaway row, then deletes it). Use this after any migration — it catches a missing column <i>or</i> a missing unique index before you spend minutes uploading a large file.</p>
+    <div class="row"><button class="btn sec" onclick="runWriteCheck()">Test database write</button>
+      <span id="wc_out" class="note" style="align-self:center"></span></div></div>
   <div class="card" style="margin-top:16px"><h2>Week cutoff</h2>
     <p class="note">Auto rule: the newest week with data is treated as in-progress (forecast). Override only if a completed week is being held back.</p>
     <div class="row" style="margin-top:8px;align-items:center">
@@ -606,6 +610,18 @@ async function doImport(id,ep,commit){
       : "▼ "+e.message;
     pv.textContent=msg;
   }finally{ clearInterval(tick); IMPORT_BUSY=false; }
+}
+async function runWriteCheck(){
+  const out=$("wc_out"); out.innerHTML=`<span class="spin"></span> testing…`;
+  try{
+    const r=await api("/health/writecheck?version_id="+VID);
+    if(r.ok){
+      out.innerHTML="▲ Database write OK — imports will work.";
+      SCHEMA_OK=true; SCHEMA_MISSING=[]; renderSchemaBanner();
+    }else{
+      out.innerHTML=`▼ <b>${esc(String(r.checks&&r.checks.actual||"failed"))}</b><br><b>Fix:</b> ${esc(String(r.fix||""))}`;
+    }
+  }catch(e){ out.innerHTML="▼ "+esc(e.message); }
 }
 async function doHistory(commit){
   const files=$("f_his").files;

@@ -11,8 +11,8 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Query, Body,
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
 
-__version__ = "1.5.9"
-BUILD = "2026-07-22-25"
+__version__ = "1.5.10"
+BUILD = "2026-07-22-26"
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
 SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_KEY") or os.environ.get("SUPABASE_KEY", "")
@@ -34,9 +34,28 @@ def _cors_json(status, payload):
         "Access-Control-Expose-Headers": "*",
     })
 
+def _db_hint(msg):
+    """Turn a raw database error into the specific migration step that fixes it."""
+    low = (msg or "").lower()
+    if "on conflict" in low or "unique or exclusion constraint" in low or "42p10" in low:
+        return ("  FIX: the version-scoped unique indexes are missing. Run the v1.5.10 block at the "
+                "end of ops_schema.sql, then ops_grants.sql, then:  NOTIFY pgrst, 'reload schema';")
+    if "does not exist" in low and "column" in low:
+        return ("  FIX: the database is missing columns added in v1.5.6. Run ops_schema.sql, then "
+                "ops_grants.sql, then:  NOTIFY pgrst, 'reload schema';")
+    if "duplicate key" in low or "23505" in low:
+        return ("  FIX: an obsolete cycle-scoped unique constraint is still present. Run the v1.5.10 "
+                "block at the end of ops_schema.sql, then:  NOTIFY pgrst, 'reload schema';")
+    if "permission denied" in low or "42501" in low:
+        return "  FIX: run ops_grants.sql, then:  NOTIFY pgrst, 'reload schema';"
+    return ""
+
 @app.exception_handler(StarletteHTTPException)
 async def _http_exc_handler(request, exc):
-    return _cors_json(exc.status_code, {"detail": exc.detail})
+    d = exc.detail
+    if isinstance(d, str) and exc.status_code >= 500:
+        d = d + _db_hint(d)
+    return _cors_json(exc.status_code, {"detail": d})
 
 @app.exception_handler(RequestValidationError)
 async def _validation_exc_handler(request, exc):
@@ -48,13 +67,7 @@ async def _unhandled_exc_handler(request, exc):
     tb = traceback.format_exc()
     log.error("UNHANDLED %s %s\n%s", request.method, request.url.path, tb)
     msg = f"{type(exc).__name__}: {exc}"
-    hint = ""
-    low = msg.lower()
-    if "version_id" in low or "column" in low and "does not exist" in low:
-        hint = (" — the database is missing columns added in v1.5.6. Run ops_schema.sql, then "
-                "ops_grants.sql, then reload the PostgREST schema cache "
-                "(NOTIFY pgrst, 'reload schema';). See /health/schema for the exact list.")
-    return _cors_json(500, {"detail": msg[:400] + hint})
+    return _cors_json(500, {"detail": msg[:600] + _db_hint(msg)})
 
 app.add_middleware(
     CORSMiddleware,
@@ -135,6 +148,17 @@ class MemoryDB:
                 out.append(self.insert(table, row))
         return out
 
+    def _raise(self, r, table, op):
+        """PostgREST puts the real Postgres error in the response body; raise_for_status()
+        throws it away. Surface it so a failure explains itself."""
+        try:
+            body = r.json()
+            detail = "; ".join(str(body.get(k)) for k in ("message", "details", "hint", "code")
+                               if body.get(k))
+        except Exception:
+            detail = (r.text or "")[:300]
+        raise HTTPException(502, f"Database rejected {op} on '{table}' (HTTP {r.status_code}): {detail}")
+
     def has_column(self, table, col):
         return True   # in-memory store is schemaless
 
@@ -177,12 +201,14 @@ class RestDB:
         if order:
             params["order"] = order.lstrip("-") + (".desc" if order.startswith("-") else ".asc")
         r = self.client.get(f"{self.base}/{table}", headers=self.h, params=params)
-        r.raise_for_status(); return r.json()
+        if r.status_code >= 400: self._raise(r, table, "select")
+        return r.json()
 
     def insert(self, table, row):
         h = dict(self.h); h["Prefer"] = "return=representation"
         r = self.client.post(f"{self.base}/{table}", headers=h, json=row)
-        r.raise_for_status(); return r.json()[0]
+        if r.status_code >= 400: self._raise(r, table, "insert")
+        return r.json()[0]
 
     def upsert(self, table, rows, keys):
         if not rows: return []
@@ -191,7 +217,8 @@ class RestDB:
         out = []
         for i in range(0, len(rows), 500):  # homogeneous batches, chunked
             r = self.client.post(f"{self.base}/{table}", headers=h, params=params, json=rows[i:i+500])
-            r.raise_for_status(); out.extend(r.json())
+            if r.status_code >= 400: self._raise(r, table, "upsert")
+            out.extend(r.json())
         return out
 
     def update(self, table, filters, patch):
@@ -585,6 +612,45 @@ def health_schema(force: bool = False):
             "required": [f"{t}.{c}" for t, c in REQUIRED_COLUMNS],
             "fix": None if not miss else
                    "Run ops_schema.sql, then ops_grants.sql, then: NOTIFY pgrst, 'reload schema';"}
+
+@app.get("/health/writecheck")
+def health_writecheck(version_id: int, authorization: Optional[str] = Header(None)):
+    """Actually perform the upsert that imports rely on, using a sentinel row, then remove it.
+    A column check alone cannot catch a missing unique index — this does, before you spend
+    minutes uploading a large file."""
+    require_role(authorization, ("admin", "planner"))
+    v = DB.select("version", {"id": version_id})
+    if not v: raise HTTPException(404, "version not found")
+    cyc = DB.select("cycle", {"id": v[0]["cycle_id"]})[0]
+    pers = sorted(DB.select("period", {"cycle_id": cyc["id"]}), key=lambda p: p.get("sort", 0))
+    if not pers:
+        pers = [ensure_periods_bulk(cyc["id"], {(1, 1)})[(1, 1)]]
+    pid = pers[0]["id"]
+    SENTINEL = "__WRITECHECK__"
+    results = {}
+    try:
+        DB.upsert("actual", [{"version_id": version_id, "cycle_id": cyc["id"], "period_id": pid,
+                              "dc_code": "ATL", "channel_code": SENTINEL, "kind": SENTINEL,
+                              "units": 0}],
+                  ["version_id", "period_id", "dc_code", "channel_code", "kind"])
+        # write twice: proves the conflict target resolves instead of duplicating
+        DB.upsert("actual", [{"version_id": version_id, "cycle_id": cyc["id"], "period_id": pid,
+                              "dc_code": "ATL", "channel_code": SENTINEL, "kind": SENTINEL,
+                              "units": 0}],
+                  ["version_id", "period_id", "dc_code", "channel_code", "kind"])
+        results["actual"] = "ok"
+    except HTTPException as e:
+        results["actual"] = f"FAILED: {e.detail}"
+    except Exception as e:
+        results["actual"] = f"FAILED: {type(e).__name__}: {e}"
+    finally:
+        try: DB.delete("actual", {"version_id": version_id, "kind": SENTINEL})
+        except Exception: pass
+    ok = all(str(x) == "ok" for x in results.values())
+    return {"ok": ok, "checks": results, "missing_columns": schema_missing(force=True),
+            "fix": None if ok else
+                   "Run ops_schema.sql (including the v1.5.10 block at the end), then "
+                   "ops_grants.sql, then:  NOTIFY pgrst, 'reload schema';"}
 
 @app.get("/import/status")
 def import_status(version_id: int, kind: str):
