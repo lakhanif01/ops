@@ -211,7 +211,7 @@ window.addEventListener("error",function(ev){
 
 <script>
 "use strict";
-const APP_VERSION="1.5.7", FRONT_BUILD="2026-07-21-23";
+const APP_VERSION="1.5.8", FRONT_BUILD="2026-07-22-24";
 // Safe storage — mobile Safari (Private mode) THROWS on localStorage access, which would
 // halt the whole script and show a blank page. This wrapper degrades to an in-memory map.
 const _mem={};
@@ -373,7 +373,9 @@ async function refreshModel(){
   LOADING=true; renderNavDots();
   try{
     MODEL=await api("/model?version_id="+VID);
-    try{ MODEL._baseline=await api("/plan_baseline?version_id="+VID); }catch(_){ MODEL._baseline=null; }
+    // Plan baseline runs the whole model a second time, so it is fetched lazily — only when the
+    // Direct-by-customer view (the only consumer, for its drift banner) is actually opened.
+    MODEL._baseline=null; MODEL._baselineTried=false;
   }
   catch(e){MODEL=null;toast("Model: "+e.message);}
   LOADING=false;
@@ -512,31 +514,46 @@ function vImports(){
       <button class="btn sm sec" onclick="setCutoff(null)">Back to auto</button>
     </div></div>`;
 }
+const IMPORT_KIND={"/import/na":"NA","/import/actuals":"ACTUALS","/import/accessories":"ACC",
+                   "/import/dummies":"DUMMY","/import/customers":"CUSTFC"};
+let IMPORT_BUSY=false;
 async function doImport(id,ep,commit){
   const f=$("f_"+id).files[0];
   if(!f){toast("Choose a file first");return;}
+  // One import at a time. Running several large uploads together starves connections and
+  // spikes memory on the backend — that's what produced "Failed to fetch" on all of them.
+  if(IMPORT_BUSY){toast("▼ Another import is running — let it finish first");return;}
   const pv=$("pv_"+id);pv.style.display="block";
-  // On COMMIT: first peek (preview) to see if this import type already loaded for this week; if so, confirm overwrite.
+  // On COMMIT: check the already-imported flag with a cheap GET (no file upload).
   if(commit){
-    pv.innerHTML=`<span class="spin"></span> Checking…`;
-    const pf=new FormData();pf.append("file",f);pf.append("version_id",VID);pf.append("commit",false);
-    if(id==="cus")pf.append("sheet",$("cus_sheet").value||"");
-    try{
-      const peek=await api(ep,{method:"POST",body:pf});
-      const meta0=peek.meta||peek;
-      if(meta0.already_imported){
-        if(!confirm("This week already has this import committed.\n\nRe-committing will CLEAN-REPLACE it (old rows for this import are cleared first, then the new file loads — no stale data).\n\nProceed with overwrite?")){
-          pv.innerHTML=`<span class="note">Overwrite cancelled — existing data kept.</span>`;return;
+    const kind=IMPORT_KIND[ep];
+    if(kind){
+      pv.innerHTML=`<span class="spin"></span> Checking…`;
+      try{
+        const st=await api(`/import/status?version_id=${VID}&kind=${kind}`);
+        if(st.already_imported){
+          if(!confirm("This week already has this import committed.\n\nRe-committing will CLEAN-REPLACE it (old rows for this import are cleared first, then the new file loads — no stale data).\n\nProceed with overwrite?")){
+            pv.innerHTML=`<span class="note">Overwrite cancelled — existing data kept.</span>`;return;
+          }
         }
-      }
-    }catch(e){pv.textContent="▼ "+e.message;return;}
+      }catch(e){pv.textContent="▼ "+e.message;return;}
+    }
   }
-  const bigEp=/actuals|dummies|accessories|history/.test(ep);
-  pv.innerHTML=`<span class="spin"></span> ${commit?"Committing":"Previewing"}…${bigEp?" <span class='note'>large file — this can take up to a minute, please don't close the tab</span>":""}`;
+  IMPORT_BUSY=true;
+  const mb=(f.size/1048576);
+  const big=mb>5;
+  const t0=Date.now();
+  pv.innerHTML=`<span class="spin"></span> ${commit?"Committing":"Previewing"}…${big?` <span class='note'>${mb.toFixed(0)} MB — uploading then processing, please keep this tab open</span>`:""}`;
+  const tick=setInterval(()=>{
+    const s=Math.round((Date.now()-t0)/1000);
+    const el=$("pv_"+id); if(el&&el.querySelector(".spin"))
+      el.innerHTML=`<span class="spin"></span> ${commit?"Committing":"Previewing"}… <span class='note'>${s}s elapsed${big?` · ${mb.toFixed(0)} MB file`:""}</span>`;
+  },1000);
   const fd=new FormData();fd.append("file",f);fd.append("version_id",VID);fd.append("commit",commit);
   if(id==="cus")fd.append("sheet",$("cus_sheet").value||"");
   try{
     const r=await api(ep,{method:"POST",body:fd});
+    clearInterval(tick);
     const meta=r.meta||r;
     // surface unmapped COTs/plants prominently with a one-click mapper
     let warn="";
@@ -551,23 +568,42 @@ async function doImport(id,ep,commit){
     if(meta.already_imported && !commit) warn+=`<div class="warnbox" style="margin:8px 0">▼ This import already exists for this week. Committing will clean-replace it (no stale rows).</div>`;
     pv.innerHTML=warn+`<pre style="white-space:pre-wrap;margin:0">${esc(JSON.stringify(meta,null,1).slice(0,1500))}</pre>`;
     if(commit){toast("Committed ✓");await refreshModel();}
-  }catch(e){pv.textContent="▼ "+e.message;}
+  }catch(e){
+    const msg=/failed to fetch|networkerror|load failed/i.test(e.message||"")
+      ? "▼ Connection dropped before the import finished. The file may be very large or the link slow — try again; if it keeps happening, import this file on its own with no other imports running."
+      : "▼ "+e.message;
+    pv.textContent=msg;
+  }finally{ clearInterval(tick); IMPORT_BUSY=false; }
 }
 async function doHistory(commit){
   const files=$("f_his").files;
   if(!files.length){toast("Choose one or more files");return;}
+  if(IMPORT_BUSY){toast("▼ Another import is running — let it finish first");return;}
   const pv=$("pv_his");pv.style.display="block";
-  pv.innerHTML=`<span class="spin"></span> ${commit?"Committing":"Previewing"} ${files.length} file(s)…`;
+  let mb=0; for(const f of files) mb+=f.size/1048576;
+  IMPORT_BUSY=true;
+  const t0=Date.now();
+  const tick=setInterval(()=>{
+    const s=Math.round((Date.now()-t0)/1000);
+    if(pv.querySelector(".spin"))
+      pv.innerHTML=`<span class="spin"></span> ${commit?"Committing":"Previewing"} ${files.length} file(s)… <span class='note'>${s}s elapsed · ${mb.toFixed(0)} MB total — keep this tab open</span>`;
+  },1000);
+  pv.innerHTML=`<span class="spin"></span> ${commit?"Committing":"Previewing"} ${files.length} file(s)… <span class='note'>${mb.toFixed(0)} MB total — keep this tab open</span>`;
   const fd=new FormData();
   for(const f of files) fd.append("files",f);
   fd.append("commit",commit);
   try{
     const r=await api("/import/history",{method:"POST",body:fd});
+    clearInterval(tick);
     const meta=r.meta||r;
     pv.innerHTML=`<div class="note" style="margin-bottom:6px">Files: ${(meta.files||[]).map(esc).join(", ")}</div>`
       +`<pre style="white-space:pre-wrap;margin:0">${esc(JSON.stringify(meta,null,1).slice(0,1500))}</pre>`;
     if(commit){toast(`Committed ${files.length} history file(s) ✓`);await refreshModel();}
-  }catch(e){pv.textContent="▼ "+e.message;}
+  }catch(e){
+    pv.textContent=/failed to fetch|networkerror|load failed/i.test(e.message||"")
+      ? "▼ Connection dropped before the import finished. Try fewer files at a time, and make sure no other import is running."
+      : "▼ "+e.message;
+  }finally{ clearInterval(tick); IMPORT_BUSY=false; }
 }
 async function mapCot(cot,selId){
   const ch=document.getElementById(selId).value;
@@ -1384,6 +1420,12 @@ show=function(v){
   if(v==="valid"&&VID){loadImportLog();runTieout();}
   if(v==="admin"&&AUTH.role==="admin"){loadUsers();loadStrays();}
   if(v==="pen"&&MODEL&&!MODEL._pen)loadPenIntoModel().then(()=>{if(VIEW==="pen")_show("pen");});
+  if(v==="cust"&&MODEL&&!MODEL._baselineTried){
+    MODEL._baselineTried=true;
+    api("/plan_baseline?version_id="+VID)
+      .then(b=>{MODEL._baseline=b; if(VIEW==="cust")_show("cust");})
+      .catch(()=>{MODEL._baseline=null;});
+  }
   if(v==="pen"&&document.getElementById("alias_box"))loadAliases();
   if(v==="rates"&&MODEL&&(!MODEL._rates||!MODEL._dummy)){
     Promise.all([api("/rates?version_id="+VID),api("/dummy_plan?version_id="+VID)]).then(([r2,d])=>{

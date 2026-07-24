@@ -11,8 +11,8 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Query, Body,
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
 
-__version__ = "1.5.7"
-BUILD = "2026-07-21-23"
+__version__ = "1.5.8"
+BUILD = "2026-07-22-24"
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
 SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_KEY") or os.environ.get("SUPABASE_KEY", "")
@@ -253,6 +253,22 @@ def ensure_period(cycle_id, month_no, week_no):
     return DB.insert("period", {"cycle_id": cycle_id, "month_no": month_no, "week_no": week_no,
                                 "label": f"{month_no}-{week_no}", "sort": month_no * 100 + week_no})
 
+def ensure_periods_bulk(cycle_id, pairs):
+    """Resolve many (month_no, week_no) pairs to period rows with ONE select and ONE batched
+    insert. Replaces per-cell ensure_period() calls, which cost an HTTP round trip each against
+    a hosted Postgres and were the dominant import cost. Returns {(mo, wk): period_row}."""
+    pairs = {(int(m), int(w)) for m, w in pairs}
+    existing = DB.select("period", {"cycle_id": cycle_id})
+    have = {(r["month_no"], r["week_no"]): r for r in existing}
+    missing = [p for p in pairs if p not in have]
+    if missing:
+        new_rows = [{"cycle_id": cycle_id, "month_no": m, "week_no": w,
+                     "label": f"{m}-{w}", "sort": m * 100 + w} for (m, w) in sorted(missing)]
+        DB.upsert("period", new_rows, ["cycle_id", "month_no", "week_no"])
+        for r in DB.select("period", {"cycle_id": cycle_id}):
+            have[(r["month_no"], r["week_no"])] = r
+    return {p: have[p] for p in pairs if p in have}
+
 def plant_to_dc(plant, aliases, _cache=None):
     if not plant: return None
     p = str(plant).upper()
@@ -477,6 +493,21 @@ def _commit_or_preview(commit, kind, filename, rows_payload, do_commit):
                              "meta": result.get("meta", {}), "created_at": datetime.datetime.utcnow().isoformat()})
     return {"preview": False, **result}
 
+@app.get("/import/status")
+def import_status(version_id: int, kind: str):
+    """Lightweight check for whether an import type is already committed for this week.
+    Replaces the old 'peek' that re-uploaded and re-parsed the whole file just to read this
+    flag — that doubled upload time and parse time on every commit."""
+    k = (kind or "").upper()
+    if k not in ("NA", "CUSTFC", "ACTUALS", "ACC", "DUMMY"):
+        raise HTTPException(400, "unknown import kind")
+    # Actuals / accessories / dummies never warn on re-import (standing rule: a fresh week is a
+    # true clean slate and re-committing simply clean-replaces). Mirrors the hardcoded
+    # already_imported=False in those importers' previews, so behaviour is unchanged.
+    if k in ("ACTUALS", "ACC", "DUMMY"):
+        return {"kind": k, "already_imported": False}
+    return {"kind": k, "already_imported": _already_imported(k, version_id=version_id)}
+
 @app.post("/import/na")
 async def import_na(file: UploadFile = File(...), version_id: int = Form(...), commit: bool = Form(False), authorization: Optional[str] = Header(None)):
     require_role(authorization, ('admin','planner'))
@@ -522,8 +553,9 @@ async def import_na(file: UploadFile = File(...), version_id: int = Form(...), c
     def do_commit():
         _clear_import("NA", version_id=version_id)   # clean replace
         rows = []
+        _pmap = ensure_periods_bulk(cyc["id"], grid.keys())
         for (mo, wk), vals in grid.items():
-            per = ensure_period(cyc["id"], mo, wk)
+            per = _pmap[(mo, wk)]
             for code, units in vals.items():
                 if code == "": continue
                 rows.append({"version_id": version_id, "period_id": per["id"], "channel_code": code, "units": units})
@@ -647,8 +679,9 @@ async def import_actuals(file: UploadFile = File(...), version_id: int = Form(..
     def do_commit():
         _clear_import("ACTUALS", version_id=version_id)   # clean replace THIS week (GROSS+RETURN)
         rows = []
+        _pmap = ensure_periods_bulk(cyc["id"], {(a[1], a[2]) for a in agg.keys()})
         for (yr, mo, wk, dc, ch, k), u in agg.items():
-            per = ensure_period(cyc["id"], mo, wk)
+            per = _pmap[(mo, wk)]
             rows.append({"version_id": version_id, "cycle_id": cyc["id"], "period_id": per["id"], "dc_code": dc,
                          "channel_code": ch, "kind": k, "units": u})
         DB.upsert("actual", rows, ["version_id", "period_id", "dc_code", "channel_code", "kind"])
@@ -772,7 +805,8 @@ async def import_accessories(file: UploadFile = File(...), version_id: int = For
         preview["by_dc"][dc] = round(preview["by_dc"].get(dc, 0) + u)
     def do_commit():
         _clear_import("ACC", version_id=version_id)
-        rows = [{"version_id": version_id, "cycle_id": cyc["id"], "period_id": ensure_period(cyc["id"], mo, wk)["id"],
+        _pmap = ensure_periods_bulk(cyc["id"], {(a[0], a[1]) for a in agg.keys()})
+        rows = [{"version_id": version_id, "cycle_id": cyc["id"], "period_id": _pmap[(mo, wk)]["id"],
                  "dc_code": dc, "channel_code": "", "kind": "ACC", "units": u}
                 for (mo, wk, dc), u in agg.items()]
         DB.upsert("actual", rows, ["version_id", "period_id", "dc_code", "channel_code", "kind"])
@@ -829,7 +863,8 @@ async def import_dummies(file: UploadFile = File(...), version_id: int = Form(..
         preview["by_dc"][dc] = round(preview["by_dc"].get(dc, 0) + u)
     def do_commit():
         _clear_import("DUMMY", version_id=version_id)
-        rows = [{"version_id": version_id, "cycle_id": cyc["id"], "period_id": ensure_period(cyc["id"], mo, wk)["id"],
+        _pmap = ensure_periods_bulk(cyc["id"], {(a[0], a[1]) for a in agg.keys()})
+        rows = [{"version_id": version_id, "cycle_id": cyc["id"], "period_id": _pmap[(mo, wk)]["id"],
                  "dc_code": dc, "channel_code": "", "kind": "DUMMY", "units": u}
                 for (mo, wk, dc), u in agg.items()]
         DB.upsert("actual", rows, ["version_id", "period_id", "dc_code", "channel_code", "kind"])
@@ -910,8 +945,9 @@ async def import_customers(file: UploadFile = File(...), version_id: int = Form(
         for c in DB.select("customer"):
             for a in (c.get("aliases") or []): cmap[str(a).strip().upper()] = c["id"]
         out = []
+        _pmap = ensure_periods_bulk(cyc["id"], grid.keys())
         for (mo, wk), g in grid.items():
-            per = ensure_period(cyc["id"], mo, wk)
+            per = _pmap[(mo, wk)]
             for n, u in g.items():
                 out.append({"version_id": version_id, "period_id": per["id"],
                             "customer_id": cmap[n.upper()], "units": u})
