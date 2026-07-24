@@ -11,8 +11,8 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Query, Body,
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
 
-__version__ = "1.5.11"
-BUILD = "2026-07-22-27"
+__version__ = "1.5.12"
+BUILD = "2026-07-22-28"
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
 SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_KEY") or os.environ.get("SUPABASE_KEY", "")
@@ -677,13 +677,21 @@ def version_readiness(vid: int):
          "count": len(dom_pen),
          "why": "Forecast week = penetration % x NA forecast. With none saved, Atlanta and Mexico forecast weeks are 0 and everything falls into Direct.",
          "fix": "Penetration % → Suggest from actuals → then click SAVE ALL %"},
-        {"key": "customers", "label": "Customer forecast (Direct file)", "ok": len(fcu) > 0, "count": len(fcu),
-         "why": "Without it no named customer columns can populate.",
-         "fix": "Imports → 5 · Customer forecast → Commit"},
-        {"key": "pen_customer", "label": "Penetration % SAVED for customers", "ok": len(pen_cu) > 0,
-         "count": len(pen_cu),
-         "why": "Splits each customer across Italy/China/Thailand. With none saved, every customer shows 0 and Other absorbs the lot.",
-         "fix": "Penetration % → Suggest from actuals → then click SAVE ALL %"},
+        {"key": "customer_list", "label": "Customer list defined", "ok": len(DB.select("customer")) > 0,
+         "count": len(DB.select("customer")),
+         "why": "Customer columns come from this list; names are matched to the BO actuals.",
+         "fix": "Admin → Customers (or import a Direct file once to seed the names)"},
+        {"key": "customers", "label": "Customer forecast (Direct file) — OPTIONAL",
+         "ok": True, "count": len(fcu),
+         "why": ("Not required. With no file, customer volumes are derived from this week's BO actuals "
+                 "(each customer's share of export volume applied to the Direct residual). Import a file "
+                 "only if you want to override that with planner numbers."),
+         "fix": "Optional: Imports → 5 · Customer forecast → Commit"},
+        {"key": "pen_customer", "label": "Penetration % SAVED for customers — OPTIONAL",
+         "ok": True, "count": len(pen_cu),
+         "why": ("Not required. Without it the country split falls back to each customer's own actual "
+                 "IT/CN/TH mix. Save penetration to override with the full brand/mix/channel ladder."),
+         "fix": "Optional: Penetration % → Suggest from actuals → Save all %"},
         {"key": "rates", "label": "Rates (returns/accessories)", "ok": len(rates) > 0, "count": len(rates),
          "why": "Optional, but returns and accessories forecasts stay 0 without them.",
          "fix": "Rates & dummies → Save"},
@@ -691,7 +699,7 @@ def version_readiness(vid: int):
          "why": "Optional; dummy units per week.", "fix": "Rates & dummies → Save"},
     ]
     blocking = [i for i in items if not i["ok"] and i["key"] in
-                ("na", "pen_channel", "customers", "pen_customer")]
+                ("na", "actuals", "pen_channel", "customer_list")]
     return {"version_id": vid, "week_tag": v[0].get("week_tag"), "items": items,
             "ok": not blocking, "blocking": [i["key"] for i in blocking]}
 
@@ -1646,6 +1654,62 @@ def compute_model(version_id: int, ignore_overrides: bool = False):
         g["rows"].append(row)
     grids["DIRECT"] = g
 
+    # --- customer base: imported Direct file if present, otherwise DERIVED from actuals ---
+    # The app's purpose is to replace Eleanor's Direct workbook, so the file must be optional.
+    # Derived mode uses this week's own BO actuals: each customer's recency-weighted share of
+    # export (IT/CN/TH) volume, applied to the Direct residual, and split by country using that
+    # customer's own actual country mix (saved penetration still wins when present).
+    _direct_by_pid = {r["period_id"]: r["gross"] for r in grids["DIRECT"]["rows"]}
+    derived_base = not fcust
+    cust_share, cust_split, act_cust = {}, {}, {}
+    if derived_base:
+        _byname = {}
+        for c in customers:
+            _byname[_norm_cust_name(c["name"])] = c["id"]
+            for a in (c.get("aliases") or []): _byname[_norm_cust_name(a)] = c["id"]
+        for al in DB.select("customer_alias"): _byname[_norm_cust_name(al["actuals_name"])] = al["customer_id"]
+        _costco = [cid for nm, cid in _byname.items() if nm.startswith("COSTCO")]
+        pid_by_mw = {(p["month_no"], p["week_no"]): p["id"] for p in periods}
+        rows_ac = DB.select("actual_customer", {"version_id": version_id})
+        latest = max(((r["year"], r["month_no"]) for r in rows_ac), default=None)
+        exp_by_cid, exp_by_cid_dc, exp_total = defaultdict(float), defaultdict(float), 0.0
+        for r in rows_ac:
+            if r["dc_code"] not in ("IT", "CN", "TH"): continue
+            u = r["units"] or 0.0
+            w = (0.85 ** max(0, (latest[0] * 12 + latest[1]) - (r["year"] * 12 + r["month_no"]))) if latest else 1.0
+            exp_total += u * w
+            n = _norm_cust_name(r["customer_name"])
+            cids = _costco if (n.startswith("COSTCO") and n not in _byname) else \
+                   ([_byname[n]] if n in _byname else [])
+            if not cids: continue
+            portion = (u * w) / len(cids)
+            for cid in cids:
+                exp_by_cid[cid] += portion
+                exp_by_cid_dc[(cid, r["dc_code"])] += portion
+            pid = pid_by_mw.get((r["month_no"], r["week_no"]))
+            if pid is not None:
+                for cid in cids:
+                    act_cust[(pid, cid, r["dc_code"])] = act_cust.get((pid, cid, r["dc_code"]), 0.0) + (u / len(cids))
+        if exp_total > 0:
+            for cid, v in exp_by_cid.items(): cust_share[cid] = v / exp_total
+        # each customer's own country mix from actuals; overall export mix as the fallback
+        overall = {dc: 0.0 for dc in ("IT", "CN", "TH")}
+        for (cid, dc), v in exp_by_cid_dc.items(): overall[dc] += v
+        ov_t = sum(overall.values())
+        overall_split = {dc: (overall[dc] / ov_t if ov_t > 0 else 1 / 3) for dc in ("IT", "CN", "TH")}
+        for cid, tot in exp_by_cid.items():
+            if tot > 0:
+                cust_split[cid] = {dc: exp_by_cid_dc.get((cid, dc), 0.0) / tot for dc in ("IT", "CN", "TH")}
+        overall_split_ref = overall_split
+        model["customer_source"] = {
+            "mode": "derived_from_actuals",
+            "customers_with_export_history": len(cust_share),
+            "note": "No Direct file imported — customer split derived from this week's BO actuals."}
+    else:
+        overall_split_ref = {"IT": 1/3, "CN": 1/3, "TH": 1/3}
+        model["customer_source"] = {"mode": "imported_direct_file",
+                                    "note": "Customer weekly totals came from the imported Direct workbook."}
+
     # --- customer-level Direct + country split ---
     cust_grid = {"rows": [], "countries": {}}
     for dc in ["IT", "CN", "TH"]:
@@ -1657,10 +1721,26 @@ def compute_model(version_id: int, ignore_overrides: bool = False):
                 for dc in ("IT", "CN", "TH")}
         for cu in customers:
             base = fcust.get((pid, cu["id"]), 0.0)
+            fixed_by_dc = None
+            if derived_base:
+                if pid in act_set:
+                    # completed week: use what actually shipped, by country, straight from actuals
+                    fixed_by_dc = {dc: act_cust.get((pid, cu["id"], dc), 0.0) for dc in ("IT", "CN", "TH")}
+                    base = sum(fixed_by_dc.values())
+                else:
+                    base = cust_share.get(cu["id"], 0.0) * _direct_by_pid.get(pid, 0.0)
             country_sum = 0.0     # ALL tab = sum of the country-allocated values (post-override)
             any_override = False
             for dc in ("IT", "CN", "TH"):
-                val = penv(dc, "CUSTOMER", str(cu["id"])) * base
+                if fixed_by_dc is not None:
+                    val = fixed_by_dc[dc]
+                else:
+                    pct = penv(dc, "CUSTOMER", str(cu["id"]))
+                    if derived_base and pct == 0.0:
+                        # no saved customer penetration yet: fall back to that customer's own
+                        # actual country mix so the view works with zero manual setup
+                        pct = (cust_split.get(cu["id"]) or overall_split_ref)[dc]
+                    val = pct * base
                 o = ovr_cu.get((dc, str(cu["id"]), pid))
                 src = "model"
                 if o: val, src = o["units"], "override"; any_override = True

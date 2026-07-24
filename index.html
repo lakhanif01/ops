@@ -211,7 +211,7 @@ window.addEventListener("error",function(ev){
 
 <script>
 "use strict";
-const APP_VERSION="1.5.11", FRONT_BUILD="2026-07-22-27";
+const APP_VERSION="1.5.12", FRONT_BUILD="2026-07-22-28";
 // Safe storage — mobile Safari (Private mode) THROWS on localStorage access, which would
 // halt the whole script and show a blank page. This wrapper degrades to an in-memory map.
 const _mem={};
@@ -771,7 +771,24 @@ function vCust(){
       Add a customer in Admin whenever a week's Other runs large and steady.</div>`:"";
   return `<h1>Direct by customer</h1>
   <div class="sub">The shaded <b>Total</b> column (first, after Wk·Mo) is everything shipping to that country per week — the sum of all customer columns plus Other. Other = channel residual − named customers, so this view ties to Direct. ▼ flags a week where Other exceeds 15% of residual.</div>
-  ${readinessStrip(["customers","pen_customer","pen_channel"])}
+  ${(function(){
+      const cs=(MODEL&&MODEL.customer_source)||{};
+      if(cs.mode==="derived_from_actuals"){
+        return `<div class="note" style="margin-bottom:10px;padding:8px 10px;border-radius:6px;background:#f1f5f9">
+          <b>Derived from actuals</b> — no Direct file needed. Each customer's share of export (Italy/China/Thailand)
+          volume in this week's BO actuals is applied to the Direct residual, and split by that customer's own actual
+          country mix. Completed weeks show what actually shipped.
+          ${cs.customers_with_export_history!=null?`<b>${cs.customers_with_export_history}</b> customers have export history.`:""}
+          Saving customer penetration % overrides the country split; importing a Direct file overrides the weekly totals.</div>`;
+      }
+      if(cs.mode==="imported_direct_file"){
+        return `<div class="note" style="margin-bottom:10px;padding:8px 10px;border-radius:6px;background:#f1f5f9">
+          <b>Using the imported Direct file</b> for customer weekly totals. Delete that import to fall back to
+          values derived from actuals.</div>`;
+      }
+      return "";
+    })()}
+  ${readinessStrip(["customer_list","pen_channel"])}
   <div class="row" style="margin-bottom:10px">
     <button class="btn warn" onclick="reallocateNegatives()">▼ Reallocate all negatives to Atlanta</button>
     ${CUSTTAB!=="ALL"?`<button class="btn sec" onclick="openShift()">⇄ Shift units between weeks</button>`:""}
