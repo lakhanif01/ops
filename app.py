@@ -11,14 +11,51 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Query, Body,
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
 
-__version__ = "1.5.8"
-BUILD = "2026-07-22-24"
+__version__ = "1.5.9"
+BUILD = "2026-07-22-25"
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
 SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_KEY") or os.environ.get("SUPABASE_KEY", "")
 SCHEMA = "ops"
 
 app = FastAPI(title="OPS DC Ship Forecast", version=__version__)
+import logging
+log = logging.getLogger("ops")
+logging.basicConfig(level=logging.INFO)
+from fastapi.responses import JSONResponse
+from fastapi.exceptions import RequestValidationError
+from starlette.exceptions import HTTPException as StarletteHTTPException
+
+def _cors_json(status, payload):
+    return JSONResponse(status_code=status, content=payload, headers={
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Headers": "*",
+        "Access-Control-Allow-Methods": "*",
+        "Access-Control-Expose-Headers": "*",
+    })
+
+@app.exception_handler(StarletteHTTPException)
+async def _http_exc_handler(request, exc):
+    return _cors_json(exc.status_code, {"detail": exc.detail})
+
+@app.exception_handler(RequestValidationError)
+async def _validation_exc_handler(request, exc):
+    return _cors_json(422, {"detail": f"Invalid request: {exc.errors()[:3]}"})
+
+@app.exception_handler(Exception)
+async def _unhandled_exc_handler(request, exc):
+    import traceback
+    tb = traceback.format_exc()
+    log.error("UNHANDLED %s %s\n%s", request.method, request.url.path, tb)
+    msg = f"{type(exc).__name__}: {exc}"
+    hint = ""
+    low = msg.lower()
+    if "version_id" in low or "column" in low and "does not exist" in low:
+        hint = (" — the database is missing columns added in v1.5.6. Run ops_schema.sql, then "
+                "ops_grants.sql, then reload the PostgREST schema cache "
+                "(NOTIFY pgrst, 'reload schema';). See /health/schema for the exact list.")
+    return _cors_json(500, {"detail": msg[:400] + hint})
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -98,6 +135,9 @@ class MemoryDB:
                 out.append(self.insert(table, row))
         return out
 
+    def has_column(self, table, col):
+        return True   # in-memory store is schemaless
+
     def update(self, table, filters, patch):
         n = 0
         for r in self.t[table]:
@@ -120,6 +160,17 @@ class RestDB:
 
     def _params(self, filters):
         return {k: f"eq.{v}" for k, v in (filters or {}).items()}
+
+    def has_column(self, table, col):
+        """Ask PostgREST for a single row projecting only `col`. A missing column (or a stale
+        PostgREST schema cache after a migration) makes this fail, which is exactly what we
+        want to detect before an import blows up mid-write."""
+        try:
+            r = self.client.get(f"{self.base}/{table}", headers=self.h,
+                                params={"select": col, "limit": 1})
+            return r.status_code < 400
+        except Exception:
+            return False
 
     def select(self, table, filters=None, order=None):
         params = self._params(filters)
@@ -493,6 +544,48 @@ def _commit_or_preview(commit, kind, filename, rows_payload, do_commit):
                              "meta": result.get("meta", {}), "created_at": datetime.datetime.utcnow().isoformat()})
     return {"preview": False, **result}
 
+REQUIRED_COLUMNS = [
+    ("actual", "version_id"),
+    ("actual_customer", "version_id"),
+    ("actual_dim_country", "version_id"),
+    ("actual_cust_dim", "version_id"),
+    ("customer_alias", "actuals_name"),
+]
+_SCHEMA_CACHE = {"missing": None, "ts": 0.0}
+
+def schema_missing(force=False):
+    """List required table.column pairs the live database is missing. Cached for 60s so import
+    pre-flight checks stay cheap."""
+    now = time.time()
+    if not force and _SCHEMA_CACHE["missing"] is not None and now - _SCHEMA_CACHE["ts"] < 60:
+        return _SCHEMA_CACHE["missing"]
+    miss = []
+    for t, c in REQUIRED_COLUMNS:
+        try:
+            if not DB.has_column(t, c): miss.append(f"{t}.{c}")
+        except Exception:
+            miss.append(f"{t}.{c}")
+    _SCHEMA_CACHE["missing"] = miss; _SCHEMA_CACHE["ts"] = now
+    return miss
+
+def require_schema():
+    """Fail an import early with an actionable message instead of a cryptic mid-write 500."""
+    miss = schema_missing()
+    if miss:
+        raise HTTPException(400,
+            "Database is not migrated for v1.5.6+. Missing: " + ", ".join(miss) +
+            ". Fix: run ops_schema.sql, then ops_grants.sql, then reload the PostgREST schema "
+            "cache with:  NOTIFY pgrst, 'reload schema';  (or restart the PostgREST service). "
+            "Then retry this import.")
+
+@app.get("/health/schema")
+def health_schema(force: bool = False):
+    miss = schema_missing(force=force)
+    return {"ok": not miss, "missing": miss, "db_mode": DB_MODE, "schema": SCHEMA,
+            "required": [f"{t}.{c}" for t, c in REQUIRED_COLUMNS],
+            "fix": None if not miss else
+                   "Run ops_schema.sql, then ops_grants.sql, then: NOTIFY pgrst, 'reload schema';"}
+
 @app.get("/import/status")
 def import_status(version_id: int, kind: str):
     """Lightweight check for whether an import type is already committed for this week.
@@ -657,6 +750,7 @@ def parse_all_channels(data, filename, aliases, cot_map, month_filter=None, want
 @app.post("/import/actuals")
 async def import_actuals(file: UploadFile = File(...), version_id: int = Form(...), commit: bool = Form(False), authorization: Optional[str] = Header(None)):
     require_role(authorization, ('admin','planner'))
+    require_schema()   # fail fast with an actionable message if the DB isn't migrated
     """BO 'All Channels Data' export for the CURRENT cycle. Net invoices across all transaction kinds per COT
     (Eleanor parity), wearable brands routed to RW/OW/Nuance lines, Meta LLC to META lines, goggles carved
     out of sport COTs by collection mix. Completed weeks become gray."""
@@ -769,6 +863,7 @@ async def import_history(files: List[UploadFile] = File(None), file: UploadFile 
 @app.post("/import/accessories")
 async def import_accessories(file: UploadFile = File(...), version_id: int = Form(...), commit: bool = Form(False), authorization: Optional[str] = Header(None)):
     require_role(authorization, ('admin','planner'))
+    require_schema()   # fail fast with an actionable message if the DB isn't migrated
     """Flat BO accessories report: Year, Month, Week, Invoices, Plant (sheet 'Report 2' or first flat sheet)."""
     data = await file.read()
     v = DB.select("version", {"id": version_id})
@@ -816,6 +911,7 @@ async def import_accessories(file: UploadFile = File(...), version_id: int = For
 @app.post("/import/dummies")
 async def import_dummies(file: UploadFile = File(...), version_id: int = Form(...), commit: bool = Form(False), authorization: Optional[str] = Header(None)):
     require_role(authorization, ('admin','planner'))
+    require_schema()   # fail fast with an actionable message if the DB isn't migrated
     """Dummy actuals from BO 'All Channels' flat sheet in the dummy workbook (Year/Month/Week + Invoices-like col + Plant),
     or any flat sheet with those columns."""
     data = await file.read()

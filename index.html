@@ -211,7 +211,7 @@ window.addEventListener("error",function(ev){
 
 <script>
 "use strict";
-const APP_VERSION="1.5.8", FRONT_BUILD="2026-07-22-24";
+const APP_VERSION="1.5.9", FRONT_BUILD="2026-07-22-25";
 // Safe storage — mobile Safari (Private mode) THROWS on localStorage access, which would
 // halt the whole script and show a blank page. This wrapper degrades to an in-memory map.
 const _mem={};
@@ -252,6 +252,31 @@ async function api(path,opts={}){
 }
 
 // ---------- boot ----------
+let SCHEMA_OK=true, SCHEMA_MISSING=[];
+function renderSchemaBanner(){
+  let el=document.getElementById("schemaBanner");
+  if(SCHEMA_OK){ if(el) el.remove(); return; }
+  if(!el){
+    el=document.createElement("div"); el.id="schemaBanner";
+    el.style.cssText="margin:12px 16px;padding:12px 14px;border-radius:8px;border:1px solid #b45309;background:#fffbeb;color:#7c2d12;font-size:13px;line-height:1.5";
+    // Insert as a SIBLING before <main>: _show() replaces main.innerHTML on every view change,
+    // so anything placed inside main would be wiped on the next navigation.
+    const mainEl=document.getElementById("main");
+    if(mainEl&&mainEl.parentNode) mainEl.parentNode.insertBefore(el, mainEl);
+    else document.body.insertBefore(el, document.body.firstChild);
+  }
+  el.innerHTML=`<b>▼ Database not migrated — Actuals, Accessories and Dummies imports will be rejected.</b><br>
+    Missing: <code>${SCHEMA_MISSING.map(esc).join(", ")}</code><br>
+    Fix, in order: run <b>ops_schema.sql</b> → <b>ops_grants.sql</b> → then reload the PostgREST schema cache with
+    <code>NOTIFY pgrst, 'reload schema';</code> (or restart PostgREST). Then
+    <a href="#" onclick="recheckSchema();return false;"><b>re-check</b></a>.`;
+}
+async function recheckSchema(){
+  try{ const hs=await api("/health/schema?force=true");
+    SCHEMA_OK=!!hs.ok; SCHEMA_MISSING=hs.missing||[]; renderSchemaBanner();
+    toast(SCHEMA_OK?"Database schema OK ✓":"▼ Still missing: "+SCHEMA_MISSING.join(", "));
+  }catch(e){toast("▼ "+e.message);}
+}
 async function boot(){
   let vOk=false;
   try{
@@ -261,6 +286,13 @@ async function boot(){
     $("alignChip").textContent=(vOk?"✓ ":"▲ ")+"UI "+APP_VERSION+" · engine "+v.version+" b"+(v.build||"?")+" · "+v.db_mode;
     $("alignChip").className="chip "+(vOk?"ok":"bad");
     $("alignChip").title="Frontend build "+FRONT_BUILD+" · backend build "+(v.build||"?");
+    // Surface an unmigrated database immediately — this is what used to show up as an
+    // unexplained "Failed to fetch" on Actuals / Accessories / Dummies.
+    try{
+      const hs=await api("/health/schema");
+      SCHEMA_OK = !!hs.ok; SCHEMA_MISSING = hs.missing||[];
+      renderSchemaBanner();
+    }catch(_){ SCHEMA_OK=true; }
   }catch(e){
     // Backend unreachable (or API base not set). NEVER leave a blank page — show a clear message.
     var hdr=document.querySelector("header"); if(hdr) hdr.style.display="flex";
